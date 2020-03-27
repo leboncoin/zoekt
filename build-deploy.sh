@@ -7,7 +7,7 @@ set -ex
 
 # Put the date first so we can sort.
 if [[ -z "$VERSION" ]]; then
-    VERSION=$(date --iso-8601=minutes | cut -d 'T' -f1) 
+    VERSION=$(date --iso-8601=minutes | cut -d 'T' -f1)
   if [[ -d .git ]]; then
     VERSION=${VERSION}.$(git show --pretty=format:%h -q)
   fi
@@ -46,6 +46,6 @@ EOF
 
 chmod 755 ${out}/*
 
-tar --owner=root --group=root -C ${out}/ -czf zoekt-deploy-${VERSION}.tar.gz .
+tar --owner=root --group=root -C ${out}/ -czf zoekt-${VERSION}.tar.gz .
 
 rm -rf ${out}
