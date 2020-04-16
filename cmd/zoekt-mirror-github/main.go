@@ -36,33 +36,20 @@ import (
 	"github.com/google/zoekt/gitindex"
 )
 
-type withTopicsFlag []string
+type topicsFlag []string
 
-func (f *withTopicsFlag) String() string {
-	s := append([]string{""}, *f...)
-	return strings.Join(s, "-with_topic ")
+func (f *topicsFlag) String() string {
+	return strings.Join(*f, ",")
 }
 
-func (f *withTopicsFlag) Set(value string) error {
-	*f = append(*f, value)
-	return nil
-}
-
-type withoutTopicsFlag []string
-
-func (f *withoutTopicsFlag) String() string {
-	s := append([]string{""}, *f...)
-	return strings.Join(s, "-without_topic ")
-}
-
-func (f *withoutTopicsFlag) Set(value string) error {
+func (f *topicsFlag) Set(value string) error {
 	*f = append(*f, value)
 	return nil
 }
 
 type reposFilters struct {
-	withTopics    []string
-	withoutTopics []string
+	topics        []string
+	excludeTopics []string
 }
 
 func main() {
@@ -77,10 +64,10 @@ func main() {
 	deleteRepos := flag.Bool("delete", false, "delete missing repos")
 	namePattern := flag.String("name", "", "only clone repos whose name matches the given regexp.")
 	excludePattern := flag.String("exclude", "", "don't mirror repos whose names match this regexp.")
-	withTopics := withTopicsFlag{}
-	flag.Var(&withTopics, "with_topic", "only clone repos whose have one of given topics. You can add multiple topics by setting this more than once.")
-	withoutTopics := withTopicsFlag{}
-	flag.Var(&withoutTopics, "without_topic", "don't clone repos whose have one of given topics. You can add multiple topics by setting this more than once.")
+	topics := topicsFlag{}
+	flag.Var(&topics, "topic", "only clone repos whose have one of given topics. You can add multiple topics by setting this more than once.")
+	excludeTopics := topicsFlag{}
+	flag.Var(&excludeTopics, "exclude_topic", "don't clone repos whose have one of given topics. You can add multiple topics by setting this more than once.")
 
 	flag.Parse()
 
@@ -141,8 +128,8 @@ func main() {
 	}
 
 	reposFilters := reposFilters{
-		withTopics:    withTopics,
-		withoutTopics: withoutTopics,
+		topics:        topics,
+		excludeTopics: excludeTopics,
 	}
 	var repos []*github.Repository
 	var err error
@@ -223,32 +210,27 @@ func deleteStaleRepos(destDir string, filter *gitindex.Filter, repos []*github.R
 	return nil
 }
 
-func intersection(s1 []string, s2 []string) (inter []string) {
+func hasIntersection(s1, s2 []string) bool {
 	hash := make(map[string]bool)
 	for _, e := range s1 {
 		hash[e] = true
 	}
-	interHash := make(map[string]bool)
 	for _, e := range s2 {
 		if hash[e] {
-			interHash[e] = true
+			return true
 		}
 	}
-	for e := range interHash {
-		inter = append(inter, e)
-	}
-	return
+	return false
 }
 
-func filterRepos(repos []*github.Repository, reposFilters reposFilters) []*github.Repository {
-	var filteredRepos []*github.Repository
+func filterByTopic(repos []*github.Repository, include []string, exclude []string) (filteredRepos []*github.Repository) {
 	for _, repo := range repos {
-		if (len(reposFilters.withTopics) == 0 || len(intersection(reposFilters.withTopics, repo.Topics)) > 0) &&
-			len(intersection(reposFilters.withoutTopics, repo.Topics)) == 0 {
+		if (len(include) == 0 || hasIntersection(include, repo.Topics)) &&
+			!hasIntersection(exclude, repo.Topics) {
 			filteredRepos = append(filteredRepos, repo)
 		}
 	}
-	return filteredRepos
+	return
 }
 
 func getOrgRepos(client *github.Client, org string, reposFilters reposFilters) ([]*github.Repository, error) {
@@ -264,7 +246,7 @@ func getOrgRepos(client *github.Client, org string, reposFilters reposFilters) (
 		}
 
 		opt.Page = resp.NextPage
-		repos = filterRepos(repos, reposFilters)
+		repos = filterByTopic(repos, reposFilters.topics, reposFilters.excludeTopics)
 		allRepos = append(allRepos, repos...)
 		if resp.NextPage == 0 {
 			break
@@ -286,7 +268,7 @@ func getUserRepos(client *github.Client, user string, reposFilters reposFilters)
 		}
 
 		opt.Page = resp.NextPage
-		repos = filterRepos(repos, reposFilters)
+		repos = filterByTopic(repos, reposFilters.topics, reposFilters.excludeTopics)
 		allRepos = append(allRepos, repos...)
 		if resp.NextPage == 0 {
 			break
