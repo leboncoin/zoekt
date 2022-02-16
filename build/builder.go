@@ -30,7 +30,6 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"runtime"
 	"runtime/pprof"
 	"sort"
@@ -42,6 +41,7 @@ import (
 	"github.com/bmatcuk/doublestar"
 	"github.com/google/zoekt"
 	"github.com/google/zoekt/ctags"
+	"github.com/grafana/regexp"
 	"github.com/rs/xid"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -264,7 +264,7 @@ func (o *Options) SetDefaults() {
 
 func hashString(s string) string {
 	h := sha1.New()
-	io.WriteString(h, s)
+	_, _ = io.WriteString(h, s)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
@@ -286,12 +286,12 @@ type IndexState string
 
 const (
 	IndexStateMissing IndexState = "missing"
-	IndexStateCorrupt            = "corrupt"
-	IndexStateVersion            = "version-mismatch"
-	IndexStateOption             = "option-mismatch"
-	IndexStateMeta               = "meta-mismatch"
-	IndexStateContent            = "content-mismatch"
-	IndexStateEqual              = "equal"
+	IndexStateCorrupt IndexState = "corrupt"
+	IndexStateVersion IndexState = "version-mismatch"
+	IndexStateOption  IndexState = "option-mismatch"
+	IndexStateMeta    IndexState = "meta-mismatch"
+	IndexStateContent IndexState = "content-mismatch"
+	IndexStateEqual   IndexState = "equal"
 )
 
 var readVersions = []struct {
@@ -308,28 +308,29 @@ var readVersions = []struct {
 // IncrementalSkipIndexing returns true if the index present on disk matches
 // the build options.
 func (o *Options) IncrementalSkipIndexing() bool {
-	return o.IndexState() == IndexStateEqual
+	state, _ := o.IndexState()
+	return state == IndexStateEqual
 }
 
 // IndexState checks how the index present on disk compares to the build
-// options.
-func (o *Options) IndexState() IndexState {
+// options and returns the IndexState and the name of the first shard.
+func (o *Options) IndexState() (IndexState, string) {
 	// Open the latest version we support that is on disk.
 	fn := o.findShard()
 	if fn == "" {
-		return IndexStateMissing
+		return IndexStateMissing, fn
 	}
 
 	repos, index, err := zoekt.ReadMetadataPathAlive(fn)
 	if os.IsNotExist(err) {
-		return IndexStateMissing
+		return IndexStateMissing, fn
 	} else if err != nil {
-		return IndexStateCorrupt
+		return IndexStateCorrupt, fn
 	}
 
 	for _, v := range readVersions {
 		if v.IndexFormatVersion == index.IndexFormatVersion && v.FeatureVersion != index.IndexFeatureVersion {
-			return IndexStateVersion
+			return IndexStateVersion, fn
 		}
 	}
 
@@ -342,15 +343,15 @@ func (o *Options) IndexState() IndexState {
 	}
 
 	if repo == nil {
-		return IndexStateCorrupt
+		return IndexStateCorrupt, fn
 	}
 
 	if repo.IndexOptions != o.HashOptions() {
-		return IndexStateOption
+		return IndexStateOption, fn
 	}
 
 	if !reflect.DeepEqual(repo.Branches, o.RepositoryDescription.Branches) {
-		return IndexStateContent
+		return IndexStateContent, fn
 	}
 
 	// We can mutate repo since it lives in the scope of this function call.
@@ -358,12 +359,12 @@ func (o *Options) IndexState() IndexState {
 		// non-nil err means we are trying to update an immutable field =>
 		// reindex content.
 		log.Printf("warn: immutable field changed, requires re-index: %s", err)
-		return IndexStateContent
+		return IndexStateContent, fn
 	} else if updated {
-		return IndexStateMeta
+		return IndexStateMeta, fn
 	}
 
-	return IndexStateEqual
+	return IndexStateEqual, fn
 }
 
 func (o *Options) findShard() string {
@@ -390,7 +391,7 @@ func (o *Options) findShard() string {
 			continue
 		}
 		for _, repo := range repos {
-			if repo.Name == o.RepositoryDescription.Name {
+			if repo.ID == o.RepositoryDescription.ID {
 				return fn
 			}
 		}
@@ -574,7 +575,7 @@ func (b *Builder) Finish() error {
 
 	for p := range toDelete {
 		// Don't delete compound shards, set tombstones instead.
-		if zoekt.TombstonesEnabled(filepath.Dir(p)) && strings.HasPrefix(filepath.Base(p), "compound-") {
+		if zoekt.ShardMergingEnabled() && strings.HasPrefix(filepath.Base(p), "compound-") {
 			if !strings.HasSuffix(p, ".zoekt") {
 				continue
 			}
@@ -688,6 +689,16 @@ type rankedDoc struct {
 }
 
 func rank(d *zoekt.Document, origIdx int) []float64 {
+	generated := 0.0
+	if strings.HasSuffix(d.Name, "min.js") || strings.HasSuffix(d.Name, "js.map") {
+		generated = 1.0
+	}
+
+	vendor := 0.0
+	if strings.Contains(d.Name, "vendor/") || strings.Contains(d.Name, "node_modules/") {
+		vendor = 1.0
+	}
+
 	test := 0.0
 	if testRe.MatchString(d.Name) {
 		test = 1.0
@@ -695,6 +706,12 @@ func rank(d *zoekt.Document, origIdx int) []float64 {
 
 	// Smaller is earlier (=better).
 	return []float64{
+		// Prefer docs that are not generated
+		generated,
+
+		// Prefer docs that are not vendored
+		vendor,
+
 		// Prefer docs that are not tests
 		test,
 

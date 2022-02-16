@@ -54,6 +54,10 @@ var (
 		Buckets: prometheus.ExponentialBuckets(.25, 2, 4), // 250ms -> 2s
 	}, []string{"success"}) // success=true|false
 
+	metricGetIndexOptions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "get_index_options_total",
+		Help: "The total number of times we tried to get index options for a repository. Includes errors.",
+	})
 	metricGetIndexOptionsError = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "get_index_options_error_total",
 		Help: "The total number of times we failed to get index options for a repository.",
@@ -63,7 +67,19 @@ var (
 		Name:    "index_repo_seconds",
 		Help:    "A histogram of latencies for indexing a repository.",
 		Buckets: prometheus.ExponentialBuckets(.1, 10, 7), // 100ms -> 27min
-	}, []string{"state"}) // state is an indexState
+	}, []string{
+		"state", // state is an indexState
+		"name",  // name of the repository that was indexed
+	})
+
+	metricFetchDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "index_fetch_seconds",
+		Help:    "A histogram of latencies for fetching a repository.",
+		Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 20, 30, 60, 180, 300, 600}, // 50ms -> 10 minutes
+	}, []string{
+		"success", // true|false
+		"name",    // the name of the repository that the commits were fetched from
+	})
 
 	metricIndexIncrementalIndexState = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "index_incremental_index_state",
@@ -89,16 +105,24 @@ var (
 		Name: "index_indexing_total",
 		Help: "Counts indexings (indexing activity, should be used with rate())",
 	})
+
+	metricNumStoppedTrackingTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "index_num_stopped_tracking_total",
+		Help: "Counts the number of repos we stopped tracking.",
+	})
 )
+
+// set of repositories that we want to capture separate indexing metrics for
+var reposWithSeparateIndexingMetrics = make(map[string]struct{})
 
 type indexState string
 
 const (
 	indexStateFail        indexState = "fail"
-	indexStateSuccess                = "success"
-	indexStateSuccessMeta            = "success_meta" // We only updated metadata
-	indexStateNoop                   = "noop"         // We didn't need to update index
-	indexStateEmpty                  = "empty"        // index is empty (empty repo)
+	indexStateSuccess     indexState = "success"
+	indexStateSuccessMeta indexState = "success_meta" // We only updated metadata
+	indexStateNoop        indexState = "noop"         // We didn't need to update index
+	indexStateEmpty       indexState = "empty"        // index is empty (empty repo)
 )
 
 // Server is the main functionality of zoekt-sourcegraph-indexserver. It
@@ -127,9 +151,6 @@ type Server struct {
 	// degraded search performance.
 	TargetSizeBytes int64
 
-	// Shards larger than MaxSizeBytes are excluded from merging.
-	MaxSizeBytes int64
-
 	// Compound shards smaller than minSizeBytes will be deleted by vacuum.
 	minSizeBytes int64
 
@@ -141,6 +162,9 @@ type Server struct {
 
 	// Protects the index directory from concurrent access.
 	muIndexDir sync.Mutex
+
+	// If true, shard merging is enabled.
+	shardMerging bool
 }
 
 var debug = log.New(ioutil.Discard, "", log.LstdFlags)
@@ -275,6 +299,7 @@ func (s *Server) Run() {
 
 			// Stop indexing repos we don't need to track anymore
 			count := s.queue.MaybeRemoveMissing(repos.IDs)
+			metricNumStoppedTrackingTotal.Add(float64(count))
 			if count > 0 {
 				log.Printf("stopped tracking %d repositories", count)
 			}
@@ -283,7 +308,7 @@ func (s *Server) Run() {
 			go func() {
 				defer close(cleanupDone)
 				s.muIndexDir.Lock()
-				cleanup(s.IndexDir, repos.IDs, time.Now())
+				cleanup(s.IndexDir, repos.IDs, time.Now(), s.shardMerging)
 				s.muIndexDir.Unlock()
 			}()
 
@@ -298,13 +323,15 @@ func (s *Server) Run() {
 			missing := s.queue.Bump(repos.IDs)
 			s.Sourcegraph.ForceIterateIndexOptions(s.queue.AddOrUpdate, missing...)
 
+			setCompoundShardCounter(s.IndexDir)
+
 			<-cleanupDone
 		}
 	}()
 
 	go func() {
 		for range jitterTicker(s.VacuumInterval, syscall.SIGUSR1) {
-			if zoekt.TombstonesEnabled(s.IndexDir) {
+			if s.shardMerging {
 				s.vacuum()
 			}
 		}
@@ -312,8 +339,8 @@ func (s *Server) Run() {
 
 	go func() {
 		for range jitterTicker(s.MergeInterval, syscall.SIGUSR1) {
-			if zoekt.TombstonesEnabled(s.IndexDir) {
-				err := doMerge(s.IndexDir, s.TargetSizeBytes, s.MaxSizeBytes, false)
+			if s.shardMerging {
+				err := doMerge(s.IndexDir, s.TargetSizeBytes, false)
 				if err != nil {
 					log.Printf("error during merging: %s", err)
 				}
@@ -340,18 +367,34 @@ func (s *Server) Run() {
 		state, err := s.Index(args)
 		s.muIndexDir.Unlock()
 
-		metricIndexDuration.WithLabelValues(string(state)).Observe(time.Since(start).Seconds())
+		elapsed := time.Since(start)
+
+		metricIndexDuration.WithLabelValues(string(state), repoNameForMetric(opts.Name)).Observe(elapsed.Seconds())
+
 		if err != nil {
 			log.Printf("error indexing %s: %s", args.String(), err)
 		}
+
 		switch state {
 		case indexStateSuccess:
-			log.Printf("updated index %s in %v", args.String(), time.Since(start))
+			log.Printf("updated index %s in %v", args.String(), elapsed)
 		case indexStateSuccessMeta:
-			log.Printf("updated meta %s in %v", args.String(), time.Since(start))
+			log.Printf("updated meta %s in %v", args.String(), elapsed)
 		}
 		s.queue.SetIndexed(opts, state)
 	}
+}
+
+// repoNameForMetric returns a normalized version of the given repository name that is
+// suitable for use with Prometheus metrics.
+func repoNameForMetric(repo string) string {
+	// Check to see if we want to be able to capture separate indexing metrics for this repository.
+	// If we don't, set to a default string to keep the cardinality for the Prometheus metric manageable.
+	if _, ok := reposWithSeparateIndexingMetrics[repo]; ok {
+		return repo
+	}
+
+	return ""
 }
 
 func batched(slice []uint32, size int) <-chan []uint32 {
@@ -426,12 +469,12 @@ func (s *Server) Index(args *indexArgs) (state indexState, err error) {
 	if args.Incremental {
 		bo := args.BuildOptions()
 		bo.SetDefaults()
-		incrementalState := bo.IndexState()
+		incrementalState, fn := bo.IndexState()
 		reason = string(incrementalState)
 		metricIndexIncrementalIndexState.WithLabelValues(string(incrementalState)).Inc()
 		switch incrementalState {
 		case build.IndexStateEqual:
-			debug.Printf("%s index already up to date", args.String())
+			debug.Printf("%s index already up to date. Shard=%s", args.String(), fn)
 			return indexStateNoop, nil
 
 		case build.IndexStateMeta:
@@ -524,7 +567,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == "POST" {
-		r.ParseForm()
+		_ = r.ParseForm()
 		if id, err := strconv.Atoi(r.Form.Get("repo")); err != nil {
 			data.IndexMsg = err.Error()
 		} else {
@@ -539,7 +582,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 
-	repoTmpl.Execute(w, data)
+	_ = repoTmpl.Execute(w, data)
 }
 
 // forceIndex will run the index job for repo name now. It will return always
@@ -665,9 +708,30 @@ func getEnvWithDefaultInt64(k string, defaultVal int64) int64 {
 	}
 	i, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
-		log.Fatalf("error parsing ENV %s: %s", k, err)
+		log.Fatalf("error parsing ENV %s to int64: %s", k, err)
 	}
 	return i
+}
+
+func getEnvWithDefaultInt(k string, defaultVal int) int {
+	v := os.Getenv(k)
+	if v == "" {
+		return defaultVal
+	}
+	i, err := strconv.Atoi(k)
+	if err != nil {
+		log.Fatalf("error parsing ENV %s to int: %s", k, err)
+	}
+	return i
+}
+
+func setCompoundShardCounter(indexDir string) {
+	fns, err := filepath.Glob(filepath.Join(indexDir, "compound-*.zoekt"))
+	if err != nil {
+		log.Printf("setCompoundShardCounter: %s\n", err)
+		return
+	}
+	metricNumberCompoundShards.Set(float64(len(fns)))
 }
 
 func main() {
@@ -678,19 +742,21 @@ func main() {
 
 	root := flag.String("sourcegraph_url", os.Getenv("SRC_FRONTEND_INTERNAL"), "http://sourcegraph-frontend-internal or http://localhost:3090. If a path to a directory, we fake the Sourcegraph API and index all repos rooted under path.")
 	interval := flag.Duration("interval", time.Minute, "sync with sourcegraph this often")
-	vacuumInterval := flag.Duration("vacuum_interval", time.Hour, "run vacuum this often")
+	vacuumInterval := flag.Duration("vacuum_interval", 24*time.Hour, "run vacuum this often")
 	mergeInterval := flag.Duration("merge_interval", time.Hour, "run merge this often")
 	targetSize := flag.Int64("merge_target_size", getEnvWithDefaultInt64("SRC_TARGET_SIZE", 2000), "the target size of compound shards in MiB")
-	maxSize := flag.Int64("merge_max_size", getEnvWithDefaultInt64("SRC_MAX_SIZE", 1800), "the maximum size in MiB a shard can have to be considered for merging")
 	minSize := flag.Int64("merge_min_size", getEnvWithDefaultInt64("SRC_MIN_SIZE", 1800), "the minimum size of a compound shard in MiB")
 	index := flag.String("index", defaultIndexDir, "set index directory to use")
 	listen := flag.String("listen", ":6072", "listen on this address.")
 	hostname := flag.String("hostname", hostnameBestEffort(), "the name we advertise to Sourcegraph when asking for the list of repositories to index. Can also be set via the NODE_NAME environment variable.")
 	cpuFraction := flag.Float64("cpu_fraction", 1.0, "use this fraction of the cores for indexing.")
 	dbg := flag.Bool("debug", srcLogLevelIsDebug(), "turn on more verbose logging.")
+	blockProfileRate := flag.Int("block_profile_rate", getEnvWithDefaultInt("BLOCK_PROFILE_RATE", -1), "Sampling rate of Go's block profiler in nanoseconds. Values <=0 disable the blocking profiler (default). A value of 1 includes every blocking event. See https://pkg.go.dev/runtime#SetBlockProfileRate")
 
 	// non daemon mode for debugging/testing
+	debugFind := flag.String("debug-find", "", "find a shard by repo name.")
 	debugList := flag.Bool("debug-list", false, "do not start the indexserver, rather list the repositories owned by this indexserver then quit.")
+	debugListIndexed := flag.Bool("debug-list-indexed", false, "do not start the indexserver, rather list the repositories indexed by this indexserver then quit.")
 	debugIndex := flag.String("debug-index", "", "do not start the indexserver, rather index the repository ID then quit.")
 	debugShard := flag.String("debug-shard", "", "do not start the indexserver, rather print shard stats then quit.")
 	debugMeta := flag.String("debug-meta", "", "do not start the indexserver, rather print shard metadata then quit.")
@@ -717,7 +783,13 @@ func main() {
 	}
 
 	// Tune GOMAXPROCS to match Linux container CPU quota.
-	maxprocs.Set()
+	_, _ = maxprocs.Set()
+
+	// Set the sampling rate of Go's block profiler: https://github.com/DataDog/go-profiler-notes/blob/main/guide/README.md#block-profiler.
+	// The block profiler is disabled by default.
+	if blockProfileRate != nil {
+		runtime.SetBlockProfileRate(*blockProfileRate)
+	}
 
 	// Automatically prepend our own path at the front, to minimize
 	// required configuration.
@@ -731,7 +803,7 @@ func main() {
 		}
 	}
 
-	isDebugCmd := *debugList || *debugIndex != "" || *debugShard != "" || *debugMeta != "" || *debugMerge
+	isDebugCmd := *debugList || *debugIndex != "" || *debugShard != "" || *debugMeta != "" || *debugMerge || *debugFind != "" || *debugListIndexed
 
 	if err := setupTmpDir(*index, !isDebugCmd); err != nil {
 		log.Fatalf("failed to setup TMPDIR under %s: %v", *index, err)
@@ -739,6 +811,24 @@ func main() {
 
 	if *dbg || isDebugCmd {
 		debug = log.New(os.Stderr, "", log.LstdFlags)
+	}
+
+	indexingMetricsReposAllowlist := os.Getenv("INDEXING_METRICS_REPOS_ALLOWLIST")
+	if indexingMetricsReposAllowlist != "" {
+		var repos []string
+
+		for _, r := range strings.Split(indexingMetricsReposAllowlist, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				repos = append(repos, r)
+			}
+		}
+
+		for _, r := range repos {
+			reposWithSeparateIndexingMetrics[r] = struct{}{}
+		}
+
+		debug.Printf("capturing separate indexing metrics for: %s", repos)
 	}
 
 	var sg Sourcegraph
@@ -778,8 +868,8 @@ func main() {
 		MergeInterval:   *mergeInterval,
 		CPUCount:        cpuCount,
 		TargetSizeBytes: *targetSize * 1024 * 1024,
-		MaxSizeBytes:    *maxSize * 1024 * 1024,
 		minSizeBytes:    *minSize * 1024 * 1024,
+		shardMerging:    zoekt.ShardMergingEnabled(),
 	}
 
 	if *debugList {
@@ -789,6 +879,28 @@ func main() {
 		}
 		for _, r := range repos.IDs {
 			fmt.Println(r)
+		}
+		os.Exit(0)
+	}
+
+	if *debugListIndexed {
+		indexed := listIndexed(s.IndexDir)
+		for _, r := range indexed {
+			fmt.Println(r)
+		}
+		os.Exit(0)
+	}
+
+	if *debugFind != "" {
+		args := indexArgs{
+			IndexOptions: IndexOptions{
+				Name: *debugFind,
+			},
+			IndexDir: *index,
+		}
+		bo := args.BuildOptions()
+		for _, s := range bo.FindAllShards() {
+			fmt.Println(s)
 		}
 		os.Exit(0)
 	}
@@ -823,7 +935,7 @@ func main() {
 	}
 
 	if *debugMerge {
-		err = doMerge(*index, *targetSize*1024*1024, *maxSize*1024*1024, *debugMergeSimulate)
+		err = doMerge(*index, *targetSize*1024*1024, *debugMergeSimulate)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -831,6 +943,7 @@ func main() {
 	}
 
 	initializeGoogleCloudProfiler()
+	setCompoundShardCounter(s.IndexDir)
 
 	if *listen != "" {
 		go func() {

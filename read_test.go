@@ -30,6 +30,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/zoekt/query"
 )
 
@@ -46,7 +47,9 @@ func TestReadWrite(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	b.Write(&buf)
+	if err := b.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
 	f := &memSeeker{buf.Bytes()}
 
 	r := reader{r: f}
@@ -89,7 +92,9 @@ func TestReadWriteNames(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	b.Write(&buf)
+	if err := b.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
 	f := &memSeeker{buf.Bytes()}
 
 	r := reader{r: f}
@@ -219,8 +224,8 @@ func TestReadSearch(t *testing.T) {
 				continue
 			}
 
-			if !reflect.DeepEqual(res.Files, want.FileMatches[j]) {
-				t.Errorf("matches for %s on %s\ngot:\n%v\nwant:\n%v", q, name, res.Files[0], want.FileMatches[j])
+			if d := cmp.Diff(res.Files, want.FileMatches[j]); d != "" {
+				t.Errorf("matches for %s on %s\n%s", q, name, d)
 			}
 		}
 	}
@@ -281,7 +286,9 @@ func TestBackwardsCompat(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		b.Write(&buf)
+		if err := b.Write(&buf); err != nil {
+			t.Fatal(err)
+		}
 
 		outname := fmt.Sprintf("testdata/backcompat/new_v%d.%05d.zoekt", IndexFormatVersion, 0)
 		t.Log("writing new file", outname)

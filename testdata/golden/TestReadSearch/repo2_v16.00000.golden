@@ -7,20 +7,22 @@
         "Score": 910,
         "Debug": "",
         "FileName": "main.go",
-        "Repository": "repo",
+        "Repository": "repo2",
         "Branches": null,
         "LineMatches": [
           {
             "Line": "ZnVuYyBtYWluKCkgew==",
-            "LineStart": 69,
-            "LineEnd": 82,
-            "LineNumber": 10,
+            "LineStart": 33,
+            "LineEnd": 46,
+            "LineNumber": 7,
+            "Before": null,
+            "After": null,
             "FileName": false,
             "Score": 501,
             "LineFragments": [
               {
                 "LineOffset": 0,
-                "Offset": 69,
+                "Offset": 33,
                 "MatchLength": 9,
                 "SymbolInfo": null
               }
@@ -30,7 +32,7 @@
         "RepositoryID": 0,
         "RepositoryPriority": 0,
         "Content": null,
-        "Checksum": "n9fUYqacPXg=",
+        "Checksum": "Ju1TnQKZ6mE=",
         "Language": "Go",
         "SubRepositoryName": "",
         "SubRepositoryPath": "",
@@ -42,7 +44,7 @@
         "Score": 710,
         "Debug": "",
         "FileName": "main.go",
-        "Repository": "repo",
+        "Repository": "repo2",
         "Branches": null,
         "LineMatches": [
           {
@@ -50,6 +52,8 @@
             "LineStart": 0,
             "LineEnd": 12,
             "LineNumber": 1,
+            "Before": null,
+            "After": null,
             "FileName": false,
             "Score": 501,
             "LineFragments": [
@@ -65,7 +69,7 @@
         "RepositoryID": 0,
         "RepositoryPriority": 0,
         "Content": null,
-        "Checksum": "n9fUYqacPXg=",
+        "Checksum": "Ju1TnQKZ6mE=",
         "Language": "Go",
         "SubRepositoryName": "",
         "SubRepositoryPath": "",

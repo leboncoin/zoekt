@@ -5,19 +5,30 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
-// TombstoneEnabled returns true if a file "RIP" is present in dir.
-func TombstonesEnabled(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, "RIP"))
-	return err == nil
+// ShardMergingEnabled returns true if SRC_ENABLE_SHARD_MERGING is set to true.
+func ShardMergingEnabled() bool {
+	t := os.Getenv("SRC_ENABLE_SHARD_MERGING")
+	enabled, _ := strconv.ParseBool(t)
+	return enabled
 }
 
 var mockRepos []*Repository
 
 // SetTombstone idempotently sets a tombstone for repoName in .meta.
 func SetTombstone(shardPath string, repoID uint32) error {
+	return setTombstone(shardPath, repoID, true)
+}
+
+// UnsetTombstone idempotently removes a tombstones for reopName in .meta.
+func UnsetTombstone(shardPath string, repoID uint32) error {
+	return setTombstone(shardPath, repoID, false)
+}
+
+func setTombstone(shardPath string, repoID uint32, tombstone bool) error {
 	var repos []*Repository
 	var err error
 
@@ -32,7 +43,7 @@ func SetTombstone(shardPath string, repoID uint32) error {
 
 	for _, repo := range repos {
 		if repo.ID == repoID {
-			repo.Tombstone = true
+			repo.Tombstone = tombstone
 		}
 	}
 

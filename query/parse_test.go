@@ -19,6 +19,8 @@ import (
 	"reflect"
 	"regexp/syntax"
 	"testing"
+
+	"github.com/grafana/regexp"
 )
 
 func mustParseRE(s string) *syntax.Regexp {
@@ -73,7 +75,8 @@ func TestParseQuery(t *testing.T) {
 		{"regex:abc[p-q]", &Regexp{Regexp: mustParseRE("abc[p-q]")}},
 		{"aBc[p-q]", &Regexp{Regexp: mustParseRE("aBc[p-q]"), CaseSensitive: true}},
 		{"aBc[p-q] case:auto", &Regexp{Regexp: mustParseRE("aBc[p-q]"), CaseSensitive: true}},
-		{"repo:go", &Repo{"go"}},
+		{"repo:go", &Repo{regexp.MustCompile("go")}},
+		{"repo:.*", &Repo{Regexp: regexp.MustCompile(".*")}},
 
 		{"file:\"\"", &Const{true}},
 		{"abc.*def", &Regexp{Regexp: mustParseRE("abc.*def")}},
@@ -83,7 +86,8 @@ func TestParseQuery(t *testing.T) {
 		{"c:abc", &Substring{Pattern: "abc", Content: true}},
 		{"content:abc", &Substring{Pattern: "abc", Content: true}},
 
-		{"lang:c++", &Language{"c++"}},
+		{"lang:c++", &Language{"C++"}},
+		{"lang:cpp", &Language{"C++"}},
 		{"sym:pqr", &Symbol{&Substring{Pattern: "pqr"}}},
 		{"sym:Pqr", &Symbol{&Substring{Pattern: "Pqr", CaseSensitive: true}}},
 		{"sym:.*", &Symbol{&Regexp{Regexp: mustParseRE(".*")}}},

@@ -18,6 +18,8 @@ import (
 	"log"
 	"reflect"
 	"testing"
+
+	"github.com/grafana/regexp"
 )
 
 var _ = log.Println
@@ -84,7 +86,7 @@ func TestSimplify(t *testing.T) {
 }
 
 func TestMap(t *testing.T) {
-	in := NewAnd(&Substring{Pattern: "bla"}, &Not{&Repo{"foo"}})
+	in := NewAnd(&Substring{Pattern: "bla"}, &Not{&Repo{Regexp: regexp.MustCompile("foo")}})
 	out := NewAnd(&Substring{Pattern: "bla"}, &Not{&Const{false}})
 
 	f := func(q Q) Q {

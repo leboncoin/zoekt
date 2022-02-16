@@ -15,6 +15,7 @@
 package build
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -27,11 +28,10 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/context"
-
 	"github.com/google/zoekt"
 	"github.com/google/zoekt/query"
 	"github.com/google/zoekt/shards"
+	"github.com/grafana/regexp"
 )
 
 func TestBasic(t *testing.T) {
@@ -54,7 +54,9 @@ func TestBasic(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		s := fmt.Sprintf("%d", i)
-		b.AddFile("F"+s, []byte(strings.Repeat(s, 1000)))
+		if err := b.AddFile("F"+s, []byte(strings.Repeat(s, 1000))); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := b.Finish(); err != nil {
@@ -172,7 +174,7 @@ func retryTest(t *testing.T, f func(fatalf func(format string, args ...interface
 			done <- true
 		}()
 
-		success, _ := <-done
+		success := <-done
 		if success {
 			return
 		}
@@ -213,7 +215,9 @@ func TestLargeFileOption(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		s := fmt.Sprintf("%d", i)
-		b.AddFile("F"+s, []byte(strings.Repeat("a", sizeMax+1)))
+		if err := b.AddFile("F"+s, []byte(strings.Repeat("a", sizeMax+1))); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := b.Finish(); err != nil {
@@ -264,7 +268,9 @@ func TestUpdate(t *testing.T) {
 	if b, err := NewBuilder(opts); err != nil {
 		t.Fatalf("NewBuilder: %v", err)
 	} else {
-		b.AddFile("F", []byte("hoi"))
+		if err := b.AddFile("F", []byte("hoi")); err != nil {
+			t.Errorf("AddFile: %v", err)
+		}
 		if err := b.Finish(); err != nil {
 			t.Errorf("Finish: %v", err)
 		}
@@ -275,7 +281,7 @@ func TestUpdate(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	repos, err := ss.List(ctx, &query.Repo{Pattern: "repo"}, nil)
+	repos, err := ss.List(ctx, &query.Repo{Regexp: regexp.MustCompile("repo")}, nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -297,7 +303,9 @@ func TestUpdate(t *testing.T) {
 	if b, err := NewBuilder(opts); err != nil {
 		t.Fatalf("NewBuilder: %v", err)
 	} else {
-		b.AddFile("F", []byte("hoi"))
+		if err := b.AddFile("F", []byte("hoi")); err != nil {
+			t.Errorf("AddFile: %v", err)
+		}
 		if err := b.Finish(); err != nil {
 			t.Errorf("Finish: %v", err)
 		}
@@ -309,7 +317,7 @@ func TestUpdate(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	ctx = context.Background()
-	if repos, err = ss.List(ctx, &query.Repo{Pattern: "repo"}, nil); err != nil {
+	if repos, err = ss.List(ctx, &query.Repo{Regexp: regexp.MustCompile("repo")}, nil); err != nil {
 		t.Fatalf("List: %v", err)
 	} else if len(repos.Repos) != 2 {
 		t.Errorf("List(repo): got %v, want 2 repos", repos.Repos)
@@ -325,7 +333,7 @@ func TestUpdate(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	ctx = context.Background()
-	if repos, err = ss.List(ctx, &query.Repo{Pattern: "repo"}, nil); err != nil {
+	if repos, err = ss.List(ctx, &query.Repo{Regexp: regexp.MustCompile("repo")}, nil); err != nil {
 		t.Fatalf("List: %v", err)
 	} else if len(repos.Repos) != 1 {
 		var ss []string
@@ -360,7 +368,9 @@ func TestDeleteOldShards(t *testing.T) {
 	}
 	for i := 0; i < 4; i++ {
 		s := fmt.Sprintf("%d\n", i)
-		b.AddFile("F"+s, []byte(strings.Repeat(s, 1024/2)))
+		if err := b.AddFile("F"+s, []byte(strings.Repeat(s, 1024/2))); err != nil {
+			t.Errorf("AddFile: %v", err)
+		}
 	}
 	if err := b.Finish(); err != nil {
 		t.Errorf("Finish: %v", err)
@@ -389,7 +399,9 @@ func TestDeleteOldShards(t *testing.T) {
 	}
 	for i := 0; i < 4; i++ {
 		s := fmt.Sprintf("%d\n", i)
-		b.AddFile("F"+s, []byte(strings.Repeat(s, 1024/2)))
+		if err := b.AddFile("F"+s, []byte(strings.Repeat(s, 1024/2))); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := b.Finish(); err != nil {
 		t.Errorf("Finish: %v", err)
@@ -444,7 +456,7 @@ func TestPartialSuccess(t *testing.T) {
 		nm := fmt.Sprintf("F%d", i)
 
 		// no error checking: the 2nd call will fail
-		b.AddFile(nm, []byte(strings.Repeat("01234567\n", 128)))
+		_ = b.AddFile(nm, []byte(strings.Repeat("01234567\n", 128)))
 		if i == 1 {
 			// force writes to fail.
 			if err := os.Chmod(dir, 0o555); err != nil {
@@ -458,7 +470,7 @@ func TestPartialSuccess(t *testing.T) {
 	}
 
 	// No error checking.
-	b.Finish()
+	_ = b.Finish()
 
 	// Finish cleans up temporary files.
 	if fs, err := filepath.Glob(dir + "/*"); err != nil {

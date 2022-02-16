@@ -132,34 +132,38 @@ func (q *Queue) Iterate(f func(*IndexOptions)) {
 func (q *Queue) SetIndexed(opts IndexOptions, state indexState) {
 	q.mu.Lock()
 	item := q.get(opts.RepoID)
-	item.setIndexState(state)
+
+	item.indexState = state
 	if state != indexStateFail {
 		item.indexed = reflect.DeepEqual(opts, item.opts)
 	}
+
 	if item.heapIdx >= 0 {
 		// We only update the position in the queue, never add it.
 		heap.Fix(&q.pq, item.heapIdx)
 	}
+
 	q.mu.Unlock()
 }
 
-// MaybeRemoveMissing will remove all queue items not in ids. It will
-// heuristically not run to conserve resources and return -1. Otherwise it
-// will return the number of names removed from the queue.
+// MaybeRemoveMissing will remove all queue items not in ids and return the
+// number of names removed from the queue. It will heuristically not run to
+// conserve resources.
 //
 // In the server's steady state we expect that the list of names is equal to
 // the items in queue. As such in the steady state this function should do no
 // removals. Removal requires memory allocation and coarse locking. To avoid
 // that we use a heuristic which can falsely decide it doesn't need to
 // remove. However, we will converge onto removing items.
-func (q *Queue) MaybeRemoveMissing(ids []uint32) int {
+func (q *Queue) MaybeRemoveMissing(ids []uint32) uint {
 	q.mu.Lock()
 	sameSize := len(q.items) == len(ids)
 	q.mu.Unlock()
 
 	// heuristically skip expensive work
 	if sameSize {
-		return -1
+		debug.Printf("skipping MaybeRemoveMissing due to same size: %d", len(ids))
+		return 0
 	}
 
 	set := make(map[uint32]struct{}, len(ids))
@@ -170,7 +174,7 @@ func (q *Queue) MaybeRemoveMissing(ids []uint32) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	count := 0
+	var count uint
 	for _, item := range q.items {
 		if _, ok := set[item.opts.RepoID]; ok {
 			continue
@@ -179,7 +183,9 @@ func (q *Queue) MaybeRemoveMissing(ids []uint32) int {
 		if item.heapIdx >= 0 {
 			heap.Remove(&q.pq, item.heapIdx)
 		}
-		item.setIndexState("")
+
+		item.indexState = ""
+
 		delete(q.items, item.opts.RepoID)
 		count++
 	}
@@ -214,21 +220,6 @@ func (q *Queue) get(repoID uint32) *queueItem {
 func (q *Queue) init() {
 	q.items = map[uint32]*queueItem{}
 	q.pq = make(pqueue, 0)
-}
-
-// setIndexedState will set indexedState and update the corresponding metrics
-// if the state is changing.
-func (item *queueItem) setIndexState(state indexState) {
-	if state == item.indexState {
-		return
-	}
-	if item.indexState != "" {
-		metricIndexState.WithLabelValues(string(item.indexState)).Dec()
-	}
-	item.indexState = state
-	if item.indexState != "" {
-		metricIndexState.WithLabelValues(string(item.indexState)).Inc()
-	}
 }
 
 // pqueue implements a priority queue via the interface for container/heap
@@ -286,8 +277,4 @@ var (
 		Name: "index_queue_cap",
 		Help: "The number of repositories tracked by the index queue, including popped items. Should be the same as index_num_assigned.",
 	})
-	metricIndexState = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "index_state_count",
-		Help: "The count of repositories per the state of the last index.",
-	}, []string{"state"})
 )

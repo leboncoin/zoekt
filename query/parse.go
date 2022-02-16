@@ -19,6 +19,9 @@ import (
 	"fmt"
 	"log"
 	"regexp/syntax"
+
+	"github.com/go-enry/go-enry/v2"
+	"github.com/grafana/regexp"
 )
 
 var _ = log.Printf
@@ -115,7 +118,13 @@ func parseExpr(in []byte) (Q, int, error) {
 		}
 		expr = &caseQ{text}
 	case tokRepo:
-		expr = &Repo{Pattern: text}
+		r, err := regexp.Compile(text)
+
+		if err != nil {
+			return nil, 0, err
+		}
+
+		expr = &Repo{r}
 	case tokBranch:
 		expr = &Branch{Pattern: text}
 	case tokText, tokRegex:
@@ -138,7 +147,12 @@ func parseExpr(in []byte) (Q, int, error) {
 		}
 		expr = q
 	case tokLang:
-		expr = &Language{Language: text}
+		canonical, ok := enry.GetLanguageByAlias(text)
+		if !ok {
+			expr = &Const{false}
+		} else {
+			expr = &Language{Language: canonical}
+		}
 
 	case tokSym:
 		if text == "" {
@@ -348,7 +362,6 @@ const (
 	tokLang       = 12
 	tokSym        = 13
 	tokType       = 14
-	tokVis        = 15
 )
 
 var tokNames = map[int]string{

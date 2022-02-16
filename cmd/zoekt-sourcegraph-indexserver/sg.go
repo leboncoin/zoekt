@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/zoekt"
@@ -65,12 +67,20 @@ type sourcegraphClient struct {
 	// zero a value of 10000 is used.
 	BatchSize int
 
+	// Client is used to make requests to the Sourcegraph instance. Prefer to
+	// use .doRequest() to ensure the appropriate headers are set.
 	Client *retryablehttp.Client
 
 	// configFingerprint is the last config fingerprint returned from
 	// Sourcegraph. It can be used for future calls to the configuration
 	// endpoint.
 	configFingerprint atomic.String
+
+	// configFingerprintReset tracks when we should zero out the
+	// configFingerprint. We want to periodically do this just in case our
+	// configFingerprint logic is faulty. When it is cleared out, we fallback to
+	// calculating everything.
+	configFingerprintReset time.Time
 }
 
 func (s *sourcegraphClient) List(ctx context.Context, indexed []uint32) (*SourcegraphListResult, error) {
@@ -82,6 +92,19 @@ func (s *sourcegraphClient) List(ctx context.Context, indexed []uint32) (*Source
 	batchSize := s.BatchSize
 	if batchSize == 0 {
 		batchSize = 10_000
+	}
+
+	// Check if we should recalculate everything.
+	if time.Now().After(s.configFingerprintReset) {
+		// for every 500 repos we wait a minute. 2021-12-15 on sourcegraph.com
+		// this works out to every 100 minutes.
+		next := time.Duration(len(indexed)) * time.Minute / 500
+		if min := 5 * time.Minute; next < min {
+			next = min
+		}
+		next += time.Duration(rand.Int63n(int64(next) / 4)) // jitter
+		s.configFingerprintReset = time.Now().Add(next)
+		s.configFingerprint.Store("")
 	}
 
 	// We want to use a consistent fingerprint for each call. Next time list is
@@ -125,6 +148,7 @@ func (s *sourcegraphClient) List(ctx context.Context, indexed []uint32) (*Source
 
 			metricResolveRevisionDuration.WithLabelValues("true").Observe(time.Since(start).Seconds())
 			for _, opt := range opts {
+				metricGetIndexOptions.Inc()
 				if opt.Error != "" {
 					metricGetIndexOptionsError.Inc()
 					tr.LazyPrintf("failed fetching options for %v: %v", opt.Name, opt.Error)
@@ -143,13 +167,20 @@ func (s *sourcegraphClient) List(ctx context.Context, indexed []uint32) (*Source
 }
 
 func (s *sourcegraphClient) ForceIterateIndexOptions(f func(IndexOptions), repos ...uint32) {
-	opts, err := s.GetIndexOptions(repos...)
-	if err != nil {
-		return
+	batchSize := s.BatchSize
+	if batchSize == 0 {
+		batchSize = 10_000
 	}
-	for _, o := range opts {
-		if o.Error == "" {
-			f(o.IndexOptions)
+
+	for repos := range batched(repos, batchSize) {
+		opts, err := s.GetIndexOptions(repos...)
+		if err != nil {
+			continue
+		}
+		for _, o := range opts {
+			if o.Error == "" {
+				f(o.IndexOptions)
+			}
 		}
 	}
 }
@@ -185,7 +216,7 @@ func (s *sourcegraphClient) getIndexOptions(fingerprint string, repos ...uint32)
 		req.Header.Set("X-Sourcegraph-Config-Fingerprint", fingerprint)
 	}
 
-	resp, err := s.Client.Do(req)
+	resp, err := s.doRequest(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -239,7 +270,13 @@ func (s *sourcegraphClient) listRepoIDs(ctx context.Context, indexed []uint32) (
 	}
 
 	u := s.Root.ResolveReference(&url.URL{Path: "/.internal/repos/index"})
-	resp, err := s.Client.Post(u.String(), "application/json; charset=utf8", bytes.NewReader(body))
+	req, err := retryablehttp.NewRequest(http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf8")
+
+	resp, err := s.doRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -260,6 +297,17 @@ func (s *sourcegraphClient) listRepoIDs(ctx context.Context, indexed []uint32) (
 	metricNumAssigned.Set(float64(len(data.RepoIDs)))
 
 	return data.RepoIDs, nil
+}
+
+// doRequest executes the provided request after adding the appropriate headers
+// for interacting with a Sourcegraph instance.
+func (s *sourcegraphClient) doRequest(req *retryablehttp.Request) (*http.Response, error) {
+	// Make all requests as an internal user.
+	//
+	// Should match github.com/sourcegraph/sourcegraph/internal/actor.headerKeyActorUID
+	// and github.com/sourcegraph/sourcegraph/internal/actor.headerValueInternalActor
+	req.Header.Set("X-Sourcegraph-Actor-UID", "internal")
+	return s.Client.Do(req)
 }
 
 type sourcegraphFake struct {
@@ -313,7 +361,7 @@ func (sf sourcegraphFake) GetIndexOptions(repos ...uint32) ([]indexOptionsItem, 
 
 	items := make([]indexOptionsItem, len(repos))
 	err := sf.visitRepos(func(name string) {
-		idx, ok := reposIdx[fakeID(name)]
+		idx, ok := reposIdx[sf.id(name)]
 		if !ok {
 			return
 		}
@@ -341,12 +389,12 @@ func (sf sourcegraphFake) GetIndexOptions(repos ...uint32) ([]indexOptionsItem, 
 func (sf sourcegraphFake) getIndexOptions(name string) (IndexOptions, error) {
 	dir := filepath.Join(sf.RootDir, filepath.FromSlash(name))
 	exists := func(p string) bool {
-		_, err := os.Stat(filepath.Join(dir, "SG_PRIVATE"))
+		_, err := os.Stat(filepath.Join(dir, p))
 		return err == nil
 	}
 
 	opts := IndexOptions{
-		RepoID:   fakeID(name),
+		RepoID:   sf.id(name),
 		Name:     name,
 		CloneURL: sf.getCloneURL(name),
 		Symbols:  true,
@@ -371,6 +419,18 @@ func (sf sourcegraphFake) getIndexOptions(name string) (IndexOptions, error) {
 	return opts, nil
 }
 
+func (sf sourcegraphFake) id(name string) uint32 {
+	// allow overriding the ID.
+	idPath := filepath.Join(sf.RootDir, filepath.FromSlash(name), "SG_ID")
+	if b, _ := os.ReadFile(idPath); len(b) > 0 {
+		id, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err == nil {
+			return uint32(id)
+		}
+	}
+	return fakeID(name)
+}
+
 func (sf sourcegraphFake) getCloneURL(name string) string {
 	return filepath.Join(sf.RootDir, filepath.FromSlash(name))
 }
@@ -378,7 +438,7 @@ func (sf sourcegraphFake) getCloneURL(name string) string {
 func (sf sourcegraphFake) ListRepoIDs(ctx context.Context, indexed []uint32) ([]uint32, error) {
 	var repos []uint32
 	err := sf.visitRepos(func(name string) {
-		repos = append(repos, fakeID(name))
+		repos = append(repos, sf.id(name))
 	})
 	return repos, err
 }

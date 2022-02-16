@@ -22,7 +22,9 @@ import (
 	"sort"
 	"strings"
 
+	enry_data "github.com/go-enry/go-enry/v2/data"
 	"github.com/google/zoekt/query"
+	"github.com/grafana/regexp"
 )
 
 const maxUInt16 = 0xffff
@@ -65,7 +67,7 @@ func (d *indexData) simplify(in query.Q) query.Q {
 		switch r := q.(type) {
 		case *query.Repo:
 			return d.simplifyMultiRepo(q, func(repo *Repository) bool {
-				return strings.Contains(repo.Name, r.Pattern)
+				return r.Regexp.MatchString(repo.Name)
 			})
 		case *query.RepoRegexp:
 			return d.simplifyMultiRepo(q, func(repo *Repository) bool {
@@ -98,6 +100,36 @@ func (d *indexData) simplify(in query.Q) query.Q {
 			})
 		case *query.Language:
 			_, has := d.metaData.LanguageMap[r.Language]
+			if !has && d.metaData.IndexFeatureVersion < 12 {
+				// For index files that haven't been re-indexed by go-enry,
+				// fall back to file-based matching and continue even if this
+				// repo doesn't have the specific language present.
+				extsForLang := enry_data.ExtensionsByLanguage[r.Language]
+				if extsForLang != nil {
+					extFrags := make([]string, 0, len(extsForLang))
+					for _, ext := range extsForLang {
+						extFrags = append(extFrags, regexp.QuoteMeta(ext))
+					}
+					if len(extFrags) > 0 {
+						pattern := fmt.Sprintf("(?i)(%s)$", strings.Join(extFrags, "|"))
+						// inlined copy of query.regexpQuery
+						re, err := syntax.Parse(pattern, syntax.Perl)
+						if err != nil {
+							return &query.Const{Value: false}
+						}
+						if re.Op == syntax.OpLiteral {
+							return &query.Substring{
+								Pattern:  string(re.Rune),
+								FileName: true,
+							}
+						}
+						return &query.Regexp{
+							Regexp:   re,
+							FileName: true,
+						}
+					}
+				}
+			}
 			if !has {
 				return &query.Const{Value: false}
 			}
@@ -180,6 +212,13 @@ func (d *indexData) Search(ctx context.Context, q query.Q, opts *SearchOptions) 
 		stats: &res.Stats,
 	}
 
+	// Track the number of documents found in a repository for
+	// ShardRepoMaxMatchCount
+	var (
+		lastRepoID     uint16
+		repoMatchCount int
+	)
+
 	docCount := uint32(len(d.fileBranchMasks))
 	lastDoc := int(-1)
 
@@ -196,14 +235,35 @@ nextFileMatch:
 		if int(nextDoc) <= lastDoc {
 			nextDoc = uint32(lastDoc + 1)
 		}
-		// Skip tombstoned docs
-		for nextDoc < docCount && d.repoMetaData[d.repos[nextDoc]].Tombstone {
-			nextDoc++
+
+		for ; nextDoc < docCount; nextDoc++ {
+			// Skip tombstoned docs
+			if d.repoMetaData[d.repos[nextDoc]].Tombstone {
+				continue
+			}
+
+			// Skip documents over ShardRepoMaxMatchCount if specified.
+			if opts.ShardRepoMaxMatchCount > 0 {
+				if repoMatchCount >= opts.ShardRepoMaxMatchCount && d.repos[nextDoc] == lastRepoID {
+					res.Stats.FilesSkipped++
+					continue
+				}
+			}
+
+			break
 		}
+
 		if nextDoc >= docCount {
 			break
 		}
+
 		lastDoc = int(nextDoc)
+
+		// We track lastRepoID for ShardRepoMaxMatchCount
+		if lastRepoID != d.repos[nextDoc] {
+			lastRepoID = d.repos[nextDoc]
+			repoMatchCount = 0
+		}
 
 		if canceled || (res.Stats.MatchCount >= opts.ShardMaxMatchCount && opts.ShardMaxMatchCount > 0) ||
 			(opts.ShardMaxImportantMatch > 0 && importantMatchCount >= opts.ShardMaxImportantMatch) {
@@ -238,7 +298,7 @@ nextFileMatch:
 			RepositoryPriority: md.priority,
 			FileName:           string(d.fileName(nextDoc)),
 			Checksum:           d.getChecksum(nextDoc),
-			Language:           d.languageMap[d.languages[nextDoc]],
+			Language:           d.languageMap[d.getLanguage(nextDoc)],
 		}
 
 		if s := d.subRepos[nextDoc]; s > 0 {
@@ -279,7 +339,7 @@ nextFileMatch:
 					byteMatchSz:   uint32(len(nm)),
 				})
 		}
-		fileMatch.LineMatches = cp.fillMatches(finalCands)
+		fileMatch.LineMatches = cp.fillMatches(finalCands, opts.NumContextLines)
 
 		maxFileScore := 0.0
 		for i := range fileMatch.LineMatches {
@@ -310,10 +370,16 @@ nextFileMatch:
 			fileMatch.Content = cp.data(false)
 		}
 
+		repoMatchCount += len(fileMatch.LineMatches)
+
 		res.Files = append(res.Files, fileMatch)
 		res.Stats.MatchCount += len(fileMatch.LineMatches)
 		res.Stats.FileCount++
 	}
+
+	// We do not sort Files here, instead we rely on the shards pkg to do file
+	// ranking. If we sorted now, we would break the assumption that results
+	// from the same repo in a shard appear next to each other.
 
 	for _, md := range d.repoMetaData {
 		r := md
@@ -502,6 +568,7 @@ func (d *indexData) List(ctx context.Context, q query.Q, opts *ListOptions) (rl 
 			continue
 		}
 
+		l.Stats.Add(&rle.Stats)
 		if id := rle.Repository.ID; id != 0 && minimal {
 			l.Minimal[id] = &MinimalRepoListEntry{
 				HasSymbols: rle.Repository.HasSymbols,

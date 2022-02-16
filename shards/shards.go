@@ -738,6 +738,9 @@ func observeMetrics(sr *zoekt.SearchResult) {
 }
 
 func copySlice(src *[]byte) {
+	if *src == nil {
+		return
+	}
 	dst := make([]byte, len(*src))
 	copy(dst, *src)
 	*src = dst
@@ -749,6 +752,8 @@ func copyFiles(sr *zoekt.SearchResult) {
 		copySlice(&sr.Files[i].Checksum)
 		for l := range sr.Files[i].LineMatches {
 			copySlice(&sr.Files[i].LineMatches[l].Line)
+			copySlice(&sr.Files[i].LineMatches[l].Before)
+			copySlice(&sr.Files[i].LineMatches[l].After)
 		}
 	}
 }
@@ -855,6 +860,7 @@ func (ss *shardedSearcher) List(ctx context.Context, r query.Q, opts *zoekt.List
 		}
 
 		agg.Crashes += r.rl.Crashes
+		agg.Stats.Add(&r.rl.Stats)
 
 		for _, r := range r.rl.Repos {
 			prev, ok := uniq[r.Repository.Name]

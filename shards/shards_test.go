@@ -36,6 +36,7 @@ import (
 	"github.com/google/zoekt"
 	"github.com/google/zoekt/query"
 	"github.com/google/zoekt/stream"
+	"github.com/grafana/regexp"
 )
 
 type crashSearcher struct{}
@@ -310,7 +311,9 @@ func TestUnloadIndex(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	b.Write(&buf)
+	if err := b.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
 	indexBytes := buf.Bytes()
 	indexFile := &memSeeker{indexBytes}
 	searcher, err := zoekt.NewSearcher(indexFile)
@@ -364,14 +367,33 @@ func TestShardedSearcher_List(t *testing.T) {
 		},
 	}
 
+	doc := zoekt.Document{
+		Name:     "foo.go",
+		Content:  []byte("bar\nbaz"),
+		Branches: []string{"main", "dev"},
+	}
+
 	// Test duplicate removal when ListOptions.Minimal is true and false
 	ss := newShardedSearcher(4)
 	ss.replace(map[string]zoekt.Searcher{
-		"1": searcherForTest(t, testIndexBuilder(t, repos[0])),
+		"1": searcherForTest(t, testIndexBuilder(t, repos[0], doc)),
 		"2": searcherForTest(t, testIndexBuilder(t, repos[0])),
-		"3": searcherForTest(t, testIndexBuilder(t, repos[1])),
+		"3": searcherForTest(t, testIndexBuilder(t, repos[1], doc)),
 		"4": searcherForTest(t, testIndexBuilder(t, repos[1])),
 	})
+
+	stats := zoekt.RepoStats{
+		Shards:                     2,
+		Documents:                  1,
+		IndexBytes:                 196,
+		ContentBytes:               13,
+		NewLinesCount:              1,
+		DefaultBranchNewLinesCount: 1,
+		OtherBranchesNewLinesCount: 1,
+	}
+
+	aggStats := stats
+	aggStats.Add(&aggStats) // since both repos have the exact same stats, this works
 
 	for _, tc := range []struct {
 		name string
@@ -385,13 +407,14 @@ func TestShardedSearcher_List(t *testing.T) {
 				Repos: []*zoekt.RepoListEntry{
 					{
 						Repository: *repos[0],
-						Stats:      zoekt.RepoStats{Shards: 2},
+						Stats:      stats,
 					},
 					{
 						Repository: *repos[1],
-						Stats:      zoekt.RepoStats{Shards: 2},
+						Stats:      stats,
 					},
 				},
+				Stats: aggStats,
 			},
 		},
 		{
@@ -401,13 +424,14 @@ func TestShardedSearcher_List(t *testing.T) {
 				Repos: []*zoekt.RepoListEntry{
 					{
 						Repository: *repos[0],
-						Stats:      zoekt.RepoStats{Shards: 2},
+						Stats:      stats,
 					},
 					{
 						Repository: *repos[1],
-						Stats:      zoekt.RepoStats{Shards: 2},
+						Stats:      stats,
 					},
 				},
+				Stats: aggStats,
 			},
 		},
 		{
@@ -417,7 +441,7 @@ func TestShardedSearcher_List(t *testing.T) {
 				Repos: []*zoekt.RepoListEntry{
 					{
 						Repository: *repos[1],
-						Stats:      zoekt.RepoStats{Shards: 2},
+						Stats:      stats,
 					},
 				},
 				Minimal: map[uint32]*zoekt.MinimalRepoListEntry{
@@ -426,6 +450,7 @@ func TestShardedSearcher_List(t *testing.T) {
 						Branches:   repos[0].Branches,
 					},
 				},
+				Stats: aggStats,
 			},
 		},
 	} {
@@ -433,7 +458,7 @@ func TestShardedSearcher_List(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			q := &query.Repo{Pattern: "epo"}
+			q := &query.Repo{Regexp: regexp.MustCompile("repo")}
 
 			res, err := ss.List(context.Background(), q, tc.opts)
 			if err != nil {
@@ -451,6 +476,7 @@ func TestShardedSearcher_List(t *testing.T) {
 				cmpopts.IgnoreFields(zoekt.Repository{}, "SubRepoMap"),
 				cmpopts.IgnoreFields(zoekt.Repository{}, "priority"),
 			}
+
 			if diff := cmp.Diff(tc.want, res, ignored...); diff != "" {
 				t.Fatalf("mismatch (-want +got):\n%s", diff)
 			}
@@ -474,7 +500,9 @@ func testIndexBuilder(t testing.TB, repo *zoekt.Repository, docs ...zoekt.Docume
 
 func searcherForTest(t testing.TB, b *zoekt.IndexBuilder) zoekt.Searcher {
 	var buf bytes.Buffer
-	b.Write(&buf)
+	if err := b.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
 	f := &memSeeker{buf.Bytes()}
 
 	searcher, err := zoekt.NewSearcher(f)
@@ -498,16 +526,20 @@ func reposForTest(n int) (result []*zoekt.Repository) {
 func testSearcherForRepo(b testing.TB, r *zoekt.Repository, numFiles int) zoekt.Searcher {
 	builder := testIndexBuilder(b, r)
 
-	builder.Add(zoekt.Document{
+	if err := builder.Add(zoekt.Document{
 		Name:    fmt.Sprintf("%s/filename-%d.go", r.Name, 0),
 		Content: []byte("needle needle needle haystack"),
-	})
+	}); err != nil {
+		b.Fatal(err)
+	}
 
 	for i := 1; i < numFiles; i++ {
-		builder.Add(zoekt.Document{
+		if err := builder.Add(zoekt.Document{
 			Name:    fmt.Sprintf("%s/filename-%d.go", r.Name, i),
 			Content: []byte("haystack haystack haystack"),
-		})
+		}); err != nil {
+			b.Fatal(err)
+		}
 	}
 
 	return searcherForTest(b, builder)
@@ -677,7 +709,7 @@ func TestRawQuerySearch(t *testing.T) {
 			}
 
 			gotRepos := make([]string, 0, len(sr.RepoURLs))
-			for k, _ := range sr.RepoURLs {
+			for k := range sr.RepoURLs {
 				gotRepos = append(gotRepos, k)
 			}
 			sort.Strings(gotRepos)

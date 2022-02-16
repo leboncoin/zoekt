@@ -17,11 +17,11 @@ package zoekt
 import (
 	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/google/zoekt/query"
+	"github.com/grafana/regexp"
 )
 
 // A docIterator iterates over documents in order.
@@ -413,7 +413,11 @@ func (t *andMatchTree) String() string {
 }
 
 func (t *regexpMatchTree) String() string {
-	return fmt.Sprintf("re(%s)", t.regexp)
+	f := ""
+	if t.fileName {
+		f = "f"
+	}
+	return fmt.Sprintf("%sre(%s)", f, t.regexp)
 }
 
 func (t *orMatchTree) String() string {
@@ -874,7 +878,7 @@ func (d *indexData) newMatchTree(q query.Q) (matchTree, error) {
 			reason:  "language",
 			numDocs: d.numDocs(),
 			predicate: func(docID uint32) bool {
-				return d.languages[docID] == code
+				return d.getLanguage(docID) == code
 			},
 		}, nil
 
@@ -970,7 +974,7 @@ func (d *indexData) newMatchTree(q query.Q) (matchTree, error) {
 	case *query.Repo:
 		reposWant := make([]bool, len(d.repoMetaData))
 		for repoIdx, r := range d.repoMetaData {
-			if strings.Contains(r.Name, s.Pattern) {
+			if s.Regexp.MatchString(r.Name) {
 				reposWant[repoIdx] = true
 			}
 		}
@@ -1008,17 +1012,6 @@ func (d *indexData) newMatchTree(q query.Q) (matchTree, error) {
 	}
 	log.Panicf("type %T", q)
 	return nil, nil
-}
-
-// filterDocs returns a slice of those docIDs for which predicate(docID) = true.
-func (d *indexData) filterDocs(predicate func(docID uint32) bool) []uint32 {
-	var docs []uint32
-	for i := uint32(0); i < uint32(len(d.fileBranchMasks)); i++ {
-		if predicate(i) {
-			docs = append(docs, i)
-		}
-	}
-	return docs
 }
 
 func (d *indexData) newSubstringMatchTree(s *query.Substring) (matchTree, error) {

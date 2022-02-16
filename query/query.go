@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log"
 	"reflect"
-	"regexp"
 	"regexp/syntax"
 	"sort"
 	"strconv"
@@ -29,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/RoaringBitmap/roaring"
+	"github.com/grafana/regexp"
 )
 
 var _ = log.Println
@@ -169,11 +169,11 @@ func (q *Const) String() string {
 }
 
 type Repo struct {
-	Pattern string
+	Regexp *regexp.Regexp
 }
 
 func (q *Repo) String() string {
-	return fmt.Sprintf("repo:%s", q.Pattern)
+	return fmt.Sprintf("repo:%s", q.Regexp.String())
 }
 
 // RepoRegexp is a Sourcegraph addition which searches documents where the

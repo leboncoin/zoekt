@@ -16,13 +16,13 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
-	"regexp"
 	"regexp/syntax"
 	"sort"
 	"strconv"
@@ -30,12 +30,11 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/context"
-
 	"github.com/google/zoekt"
 	"github.com/google/zoekt/query"
 	"github.com/google/zoekt/rpc"
 	"github.com/google/zoekt/stream"
+	"github.com/grafana/regexp"
 )
 
 var Funcmap = template.FuncMap{
@@ -106,12 +105,12 @@ type Server struct {
 	// "print" for the show file functionality.
 	Top *template.Template
 
-	repolist   *template.Template
-	search     *template.Template
-	result     *template.Template
-	print      *template.Template
-	about      *template.Template
-	robots     *template.Template
+	repolist *template.Template
+	search   *template.Template
+	result   *template.Template
+	print    *template.Template
+	about    *template.Template
+	robots   *template.Template
 
 	startTime time.Time
 
@@ -147,12 +146,12 @@ func NewMux(s *Server) (*http.ServeMux, error) {
 	}
 
 	for k, v := range map[string]**template.Template{
-		"results":    &s.result,
-		"print":      &s.print,
-		"search":     &s.search,
-		"repolist":   &s.repolist,
-		"about":      &s.about,
-		"robots":     &s.robots,
+		"results":  &s.result,
+		"print":    &s.print,
+		"search":   &s.search,
+		"repolist": &s.repolist,
+		"about":    &s.about,
+		"robots":   &s.robots,
 	} {
 		*v = s.Top.Lookup(k)
 		if *v == nil {
@@ -198,23 +197,43 @@ func (s *Server) serveHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request) {
-	err := s.serveSearchErr(w, r)
-
+	result, err := s.serveSearchErr(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusTeapot)
+		return
 	}
+
+	qvals := r.URL.Query()
+	if qvals.Get("format") == "json" {
+		w.Header().Add("Content-Type", "application/json")
+		encoder := json.NewEncoder(w)
+		encoder.Encode(result)
+		return
+	}
+
+	var buf bytes.Buffer
+	if result.Repos != nil {
+		err = s.repolist.Execute(&buf, &result.Repos)
+	} else if result.Result != nil {
+		err = s.result.Execute(&buf, &result.Result)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusTeapot)
+		return
+	}
+	w.Write(buf.Bytes())
 }
 
-func (s *Server) serveSearchErr(w http.ResponseWriter, r *http.Request) error {
+func (s *Server) serveSearchErr(r *http.Request) (*ApiSearchResult, error) {
 	qvals := r.URL.Query()
 	queryStr := qvals.Get("q")
 	if queryStr == "" {
-		return fmt.Errorf("no query found")
+		return nil, fmt.Errorf("no query found")
 	}
 
 	q, err := query.Parse(queryStr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	repoOnly := true
@@ -223,11 +242,19 @@ func (s *Server) serveSearchErr(w http.ResponseWriter, r *http.Request) error {
 		repoOnly = repoOnly && ok
 	})
 	if repoOnly {
-		return s.serveListReposErr(q, queryStr, w, r)
+		repos, err := s.serveListReposErr(q, queryStr, r)
+		if err == nil {
+			return &ApiSearchResult{Repos: repos}, nil
+		}
+		return nil, err
 	}
 
 	if qt, ok := q.(*query.Type); ok && qt.Type == query.TypeRepo {
-		return s.serveListReposErr(q, queryStr, w, r)
+		repos, err := s.serveListReposErr(q, queryStr, r)
+		if err == nil {
+			return &ApiSearchResult{Repos: repos}, nil
+		}
+		return nil, err
 	}
 
 	numStr := qvals.Get("num")
@@ -241,11 +268,22 @@ func (s *Server) serveSearchErr(w http.ResponseWriter, r *http.Request) error {
 		MaxWallTime: 10 * time.Second,
 	}
 
+	numCtxLines := 0
+	if qvals.Get("format") == "json" {
+		if ctxLinesStr := qvals.Get("ctx"); ctxLinesStr != "" {
+			numCtxLines, err = strconv.Atoi(ctxLinesStr)
+			if err != nil || numCtxLines < 0 || numCtxLines > 10 {
+				return nil, fmt.Errorf("Number of context lines must be between 0 and 10")
+			}
+		}
+	}
+	sOpts.NumContextLines = numCtxLines
+
 	sOpts.SetDefaults()
 
 	ctx := r.Context()
 	if result, err := s.Searcher.Search(ctx, q, &zoekt.SearchOptions{EstimateDocCount: true}); err != nil {
-		return err
+		return nil, err
 	} else if numdocs := result.ShardFilesConsidered; numdocs > 10000 {
 		// If the search touches many shards and many files, we
 		// have to limit the number of matches.  This setting
@@ -272,12 +310,12 @@ func (s *Server) serveSearchErr(w http.ResponseWriter, r *http.Request) error {
 
 	result, err := s.Searcher.Search(ctx, q, &sOpts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	fileMatches, err := s.formatResults(result, queryStr, s.Print)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	res := ResultInput{
@@ -286,24 +324,16 @@ func (s *Server) serveSearchErr(w http.ResponseWriter, r *http.Request) error {
 			Num:       num,
 			AutoFocus: true,
 		},
-		Stats:         result.Stats,
-		Query:         q.String(),
-		QueryStr:      queryStr,
-		SearchOptions: sOpts.String(),
-		FileMatches:   fileMatches,
+		Stats:       result.Stats,
+		Query:       q.String(),
+		QueryStr:    queryStr,
+		FileMatches: fileMatches,
 	}
 	if res.Stats.Wait < res.Stats.Duration/10 {
 		// Suppress queueing stats if they are neglible.
 		res.Stats.Wait = 0
 	}
-
-	var buf bytes.Buffer
-	if err := s.result.Execute(&buf, &res); err != nil {
-		return err
-	}
-
-	w.Write(buf.Bytes())
-	return nil
+	return &ApiSearchResult{Result: &res}, nil
 }
 
 func (s *Server) servePrint(w http.ResponseWriter, r *http.Request) {
@@ -380,7 +410,7 @@ func (s *Server) serveSearchBoxErr(w http.ResponseWriter, r *http.Request) error
 	if err := s.search.Execute(&buf, &d); err != nil {
 		return err
 	}
-	w.Write(buf.Bytes())
+	_, _ = w.Write(buf.Bytes())
 	return nil
 }
 
@@ -406,7 +436,7 @@ func (s *Server) serveAboutErr(w http.ResponseWriter, r *http.Request) error {
 	if err := s.about.Execute(&buf, &d); err != nil {
 		return err
 	}
-	w.Write(buf.Bytes())
+	_, _ = w.Write(buf.Bytes())
 	return nil
 }
 
@@ -422,7 +452,7 @@ func (s *Server) serveRobotsErr(w http.ResponseWriter, r *http.Request) error {
 	if err := s.robots.Execute(&buf, &data); err != nil {
 		return err
 	}
-	w.Write(buf.Bytes())
+	_, _ = w.Write(buf.Bytes())
 	return nil
 }
 
@@ -432,11 +462,11 @@ func (s *Server) serveRobots(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) serveListReposErr(q query.Q, qStr string, w http.ResponseWriter, r *http.Request) error {
+func (s *Server) serveListReposErr(q query.Q, qStr string, r *http.Request) (*RepoListInput, error) {
 	ctx := r.Context()
 	repos, err := s.Searcher.List(ctx, q, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	qvals := r.URL.Query()
@@ -460,7 +490,7 @@ func (s *Server) serveListReposErr(q query.Q, qStr string, w http.ResponseWriter
 				repos.Repos[j].IndexMetadata.IndexTime)
 		})
 	default:
-		return fmt.Errorf("got unknown sort key %q, allowed [rev]name, [rev]time, [rev]size", order)
+		return nil, fmt.Errorf("got unknown sort key %q, allowed [rev]name, [rev]time, [rev]size", order)
 	}
 	if strings.HasPrefix(order, "rev") {
 		for i, j := 0, len(repos.Repos)-1; i < j; {
@@ -514,7 +544,7 @@ func (s *Server) serveListReposErr(q query.Q, qStr string, w http.ResponseWriter
 		for _, b := range r.Repository.Branches {
 			var buf bytes.Buffer
 			if err := t.Execute(&buf, b); err != nil {
-				return err
+				return nil, err
 			}
 			repo.Branches = append(repo.Branches,
 				Branch{
@@ -525,14 +555,7 @@ func (s *Server) serveListReposErr(q query.Q, qStr string, w http.ResponseWriter
 		}
 		res.Repos = append(res.Repos, repo)
 	}
-
-	var buf bytes.Buffer
-	if err := s.repolist.Execute(&buf, &res); err != nil {
-		return err
-	}
-
-	w.Write(buf.Bytes())
-	return nil
+	return &res, nil
 }
 
 func (s *Server) servePrintErr(w http.ResponseWriter, r *http.Request) error {
@@ -550,9 +573,16 @@ func (s *Server) servePrintErr(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+
+	repoRe, err := regexp.Compile("^" + regexp.QuoteMeta(repoStr) + "$")
+
+	if err != nil {
+		return err
+	}
+
 	qs := []query.Q{
 		&query.Regexp{Regexp: re, FileName: true, CaseSensitive: true},
-		&query.Repo{Pattern: repoStr},
+		&query.Repo{Regexp: repoRe},
 	}
 
 	if branchStr := qvals.Get("b"); branchStr != "" {
@@ -603,6 +633,6 @@ func (s *Server) servePrintErr(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	w.Write(buf.Bytes())
+	_, _ = w.Write(buf.Bytes())
 	return nil
 }

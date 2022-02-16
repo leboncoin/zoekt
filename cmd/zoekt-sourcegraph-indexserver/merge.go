@@ -7,18 +7,33 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/google/zoekt"
+	"github.com/grafana/regexp"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var reCompound = regexp.MustCompile("compound-.*\\.zoekt")
+var reCompound = regexp.MustCompile(`compound-.*\.zoekt`)
+
+var metricShardMergingRunning = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "index_shard_merging_running",
+	Help: "Set to 1 if indexserver's merge job is running.",
+})
+
+var metricShardMergingDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "index_shard_merging_duration_seconds",
+	Help:    "The duration of 1 shard merge operation.",
+	Buckets: prometheus.LinearBuckets(30, 30, 10),
+}, []string{"error"})
 
 // doMerge drives the merge process.
-func doMerge(dir string, targetSizeBytes, maxSizeBytes int64, simulate bool) error {
+func doMerge(dir string, targetSizeBytes int64, simulate bool) error {
+	metricShardMergingRunning.Set(1)
+	defer metricShardMergingRunning.Set(0)
 
 	wc := &lumberjack.Logger{
 		Filename:   filepath.Join(dir, "zoekt-merge-log.tsv"),
@@ -30,7 +45,7 @@ func doMerge(dir string, targetSizeBytes, maxSizeBytes int64, simulate bool) err
 		debug.Println("simulating")
 	}
 
-	shards, excluded := loadCandidates(dir, maxSizeBytes)
+	shards, excluded := loadCandidates(dir)
 	debug.Printf("merging: found %d candidate shards, %d shards were excluded\n", len(shards), excluded)
 	if len(shards) == 0 {
 		return nil
@@ -47,7 +62,9 @@ func doMerge(dir string, targetSizeBytes, maxSizeBytes int64, simulate bool) err
 	for ix, comp := range compounds {
 		debug.Printf("compound %d: merging %d shards with total size %.2f MiB\n", ix, len(comp.shards), float64(comp.size)/(1024*1024))
 		if !simulate {
+			start := time.Now()
 			stdOut, stdErr, err := callMerge(comp.shards)
+			metricShardMergingDuration.WithLabelValues(strconv.FormatBool(err != nil)).Observe(time.Since(start).Seconds())
 			debug.Printf("callMerge: OUT: %s, ERR: %s\n", string(stdOut), string(stdErr))
 			if err != nil {
 				debug.Printf("error during merging compound %d, stdErr: %s, err: %s\n", ix, stdErr, err)
@@ -79,7 +96,7 @@ type candidate struct {
 }
 
 // loadCandidates returns all shards eligable for merging.
-func loadCandidates(dir string, maxSize int64) ([]candidate, int) {
+func loadCandidates(dir string) ([]candidate, int) {
 	excluded := 0
 
 	d, err := os.Open(dir)
@@ -104,7 +121,7 @@ func loadCandidates(dir string, maxSize int64) ([]candidate, int) {
 			continue
 		}
 
-		if isExcluded(path, fi, maxSize) {
+		if isExcluded(path, fi) {
 			excluded++
 			continue
 		}
@@ -117,7 +134,7 @@ func loadCandidates(dir string, maxSize int64) ([]candidate, int) {
 	return candidates, excluded
 }
 
-var reShard = regexp.MustCompile("\\.[0-9]{5}\\.zoekt$")
+var reShard = regexp.MustCompile(`\.[0-9]{5}\.zoekt$`)
 
 func hasMultipleShards(path string) bool {
 	if !reShard.MatchString(path) {
@@ -125,31 +142,14 @@ func hasMultipleShards(path string) bool {
 	}
 	secondShard := reShard.ReplaceAllString(path, ".00001.zoekt")
 	_, err := os.Stat(secondShard)
-	if os.IsNotExist(err) {
-		return false
-	}
-	return true
+	return !os.IsNotExist(err)
 }
 
 // isExcluded returns true if a shard should not be merged, false otherwise.
 //
 // We need path and FileInfo because FileInfo does not contain the full path, see
 // discussion here https://github.com/golang/go/issues/32300.
-func isExcluded(path string, fi os.FileInfo, maxSize int64) bool {
-
-	// It takes around 2 minutes to create a compound shard of 2 GiB. This is true
-	// even if we just add 1 repo to an existing compound shard. The reason is that
-	// we don't support incremental merging, but instead create a compound shard from
-	// scratch for each merge operation. Hence we want to avoid merging a compound
-	// shard with other smaller candidate shards if the compound shard already has a
-	// decent size.
-	//
-	// The concrete value of maxSize is not important as long as it is smaller than
-	// the targetSize and large enough to see sufficient benefits from merging.
-	if fi.Size() > maxSize {
-		return true
-	}
-
+func isExcluded(path string, fi os.FileInfo) bool {
 	if hasMultipleShards(path) {
 		return true
 	}
@@ -213,7 +213,7 @@ func callMerge(shards []candidate) ([]byte, []byte, error) {
 		return nil, nil, nil
 	}
 
-	cmd := exec.Command("zoekt-merge-index", "-")
+	cmd := exec.Command("zoekt-merge-index", "merge", "-")
 
 	outBuf := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
@@ -227,9 +227,9 @@ func callMerge(shards []candidate) ([]byte, []byte, error) {
 
 	go func() {
 		for _, s := range shards {
-			io.WriteString(wc, fmt.Sprintf("%s\n", s.path))
+			_, _ = io.WriteString(wc, fmt.Sprintf("%s\n", s.path))
 		}
-		wc.Close()
+		_ = wc.Close()
 	}()
 
 	err = cmd.Run()

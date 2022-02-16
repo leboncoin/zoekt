@@ -21,41 +21,34 @@ func TestSetTombstone(t *testing.T) {
 	dir := t.TempDir()
 	ghostShard := filepath.Join(dir, "test.zoekt")
 
-	SetTombstone(ghostShard, 2)
+	isAlive := func(alive []bool) {
+		t.Helper()
+		blob := readMeta(ghostShard)
+		ghostRepos := []*Repository{}
+		if err := json.Unmarshal(blob, &ghostRepos); err != nil {
+			t.Fatal(err)
+		}
+		for i, repo := range ghostRepos {
+			if repo.Tombstone == alive[i] {
+				t.Fatalf("r%d: want %t, got %t\n", i+1, alive[i], repo.Tombstone)
+			}
+		}
+	}
 
-	blob := readMeta(ghostShard)
-	gotRepos := []*Repository{}
-	if err := json.Unmarshal(blob, &gotRepos); err != nil {
+	if err := SetTombstone(ghostShard, 2); err != nil {
 		t.Fatal(err)
 	}
+	isAlive([]bool{true, false, true})
 
-	if gotRepos[0].Tombstone {
-		t.Fatal("r1 should have been alive")
-	}
-	if !gotRepos[1].Tombstone {
-		t.Fatal("r2 should have been dead")
-	}
-	if gotRepos[2].Tombstone {
-		t.Fatal("r3 should have been alive")
-	}
-
-	SetTombstone(ghostShard, 1)
-
-	blob = readMeta(ghostShard)
-	gotRepos = nil
-	if err := json.Unmarshal(blob, &gotRepos); err != nil {
+	if err := SetTombstone(ghostShard, 1); err != nil {
 		t.Fatal(err)
 	}
+	isAlive([]bool{false, false, true})
 
-	if !gotRepos[0].Tombstone {
-		t.Fatal("r1 should have been dead")
+	if err := UnsetTombstone(ghostShard, 2); err != nil {
+		t.Fatal(err)
 	}
-	if !gotRepos[1].Tombstone {
-		t.Fatal("r2 should have been dead")
-	}
-	if gotRepos[2].Tombstone {
-		t.Fatal("r3 should have been alive")
-	}
+	isAlive([]bool{false, true, true})
 }
 
 func mkRepos(repoNames ...string) []*Repository {

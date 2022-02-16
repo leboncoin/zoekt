@@ -122,12 +122,14 @@ func TestDoNotDeleteSingleShards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBuilder: %v", err)
 	}
-	b.AddFile("F", []byte(strings.Repeat("abc", 100)))
+	if err := b.AddFile("F", []byte(strings.Repeat("abc", 100))); err != nil {
+		t.Fatalf("AddFile: %v", err)
+	}
 	if err := b.Finish(); err != nil {
 		t.Errorf("Finish: %v", err)
 	}
 
-	err = doMerge(dir, 2000*1024*1024, 1800*1024*1024, false)
+	err = doMerge(dir, 2000*1024*1024, false)
 	if err != nil {
 		t.Fatal(err)
 	}
