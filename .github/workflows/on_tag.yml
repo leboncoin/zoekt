@@ -23,6 +23,6 @@ jobs:
                 GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
               with:
                 repository: leboncoin/zoekt
-                tag_name: ${{ github.ref_name}}
+                tag_name: deploy-${{ github.ref_name}}
                 draft: false
                 prerelease: false
