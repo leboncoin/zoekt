@@ -29,6 +29,6 @@ jobs:
               with:
                 repository: leboncoin/zoekt
                 tag_name: ${{ steps.build_deploy.outputs.release_name }}
-                files: ${{ steps.build_deploy.outputs.release_name }}.tar.gz
+                files: zoekt-${{ steps.build_deploy.outputs.release_name }}.tar.gz
                 draft: false
                 prerelease: false
