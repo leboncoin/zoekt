@@ -1,9 +1,11 @@
-name: create_release when tagged
+name: create_release_when_tagged
 
 on:
   push:
     tags:
       - 'v*'
+  # During test, to delete
+  pull_request:
 
 jobs:
     tag:
@@ -11,6 +13,11 @@ jobs:
         steps:
             - name: checkout
               uses: actions/checkout@v3
+            - name: Execute shell script
+              run: |
+                chmod +x ./build-deploy.sh
+                ./build-deploy.sh
+                ls -al
             - name: Create Release
               id: create_release
               uses: actions/create-release@latest
