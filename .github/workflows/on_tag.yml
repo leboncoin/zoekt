@@ -1,9 +1,7 @@
 name: create_release_when_tagged
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
   # During test, to delete
   pull_request:
 
