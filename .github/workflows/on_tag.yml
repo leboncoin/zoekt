@@ -1,9 +1,7 @@
-name: create_release_when_tagged
+name: release
 
 on:
   workflow_dispatch:
-  # During test, to delete
-  pull_request:
 
 permissions:
   contents: write
