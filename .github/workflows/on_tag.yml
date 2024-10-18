@@ -22,9 +22,7 @@ jobs:
               env:
                 GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
               with:
-                body_path: ${{ github.workspace }}-CHANGELOG.txt
                 repository: leboncoin/zoekt
-                tag_name: deploy-2022-05-12T1308-d515d7a
-                release_name: deploy-2022-05-12T1308-d515d7a
+                tag_name: ${{ github.ref_name}}
                 draft: false
                 prerelease: false
