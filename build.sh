@@ -14,7 +14,7 @@ for d in $(find cmd/ -maxdepth 1 -type d)
 do
   go build \
     -tags netgo \
-    -ldflags "-X github.com/sourcegraph/zoekt.Version=dev" \
+    -ldflags "-X github.com/sourcegraph/zoekt/index.Version=dev" \
     -o ${out}/$(basename $d) \
     github.com/sourcegraph/zoekt/$d
 done

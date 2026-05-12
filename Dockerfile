@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     mkdir -p /out && \
     go build \
       -trimpath \
-      -ldflags "-X github.com/sourcegraph/zoekt.Version=$VERSION" \
+      -ldflags "-X github.com/sourcegraph/zoekt/index.Version=$VERSION" \
       -o /out/ \
       ./cmd/...
 
