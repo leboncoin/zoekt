@@ -8,15 +8,14 @@ set -ex
 set -u
 
 out=zoekt-bin
-mkdir -p ${out}
+mkdir -p "${out}"
 
-for d in $(find cmd/ -maxdepth 1 -type d)
-do
+while IFS= read -r -d '' d; do
   go build \
     -tags netgo \
     -ldflags "-X github.com/sourcegraph/zoekt/index.Version=dev" \
-    -o ${out}/$(basename $d) \
-    github.com/sourcegraph/zoekt/$d
-done
+    -o "${out}/$(basename "$d")" \
+    "github.com/sourcegraph/zoekt/$d"
+done < <(find cmd/ -maxdepth 1 -type d -print0)
 
-chmod 755 ${out}/*
+chmod 755 "${out}"/*
