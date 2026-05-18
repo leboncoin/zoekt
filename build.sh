@@ -8,10 +8,10 @@ set -ex
 set -u
 
 out=zoekt-bin
-mkdir -p ${out}
+mkdir -p "${out}"
 
-for d in $(find cmd/ -maxdepth 1 -type d)
-do
+# shellcheck disable=SC2044,SC2046,SC2086
+for d in $(find cmd/ -maxdepth 1 -type d); do
   go build \
     -tags netgo \
     -ldflags "-X github.com/sourcegraph/zoekt/index.Version=dev" \
@@ -19,4 +19,4 @@ do
     github.com/sourcegraph/zoekt/$d
 done
 
-chmod 755 ${out}/*
+chmod 755 "${out}"/*

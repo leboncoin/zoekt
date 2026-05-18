@@ -16,10 +16,10 @@ fi
 set -u
 
 out=zoekt-${VERSION}
-mkdir -p ${out}
+mkdir -p "${out}"
 
-for d in $(find cmd/ -maxdepth 1 -type d)
-do
+# shellcheck disable=SC2044,SC2046,SC2086
+for d in $(find cmd/ -maxdepth 1 -type d); do
   go build \
     -tags netgo \
     -ldflags "-X github.com/sourcegraph/zoekt/index.Version=dev" \
@@ -27,7 +27,7 @@ do
     github.com/sourcegraph/zoekt/$d
 done
 
-cat <<EOF > ${out}/deploy.sh
+cat <<EOF > "${out}/deploy.sh"
 #!/bin/bash
 
 echo "Set the following in the environment."
@@ -48,8 +48,8 @@ sudo setcap 'cap_net_bind_service=+ep' bin/zoekt-webserver
 
 EOF
 
-chmod 755 ${out}/*
+chmod 755 "${out}"/*
 
-tar --owner=root --group=root -czf zoekt-deploy-${VERSION}.tar.gz ${out}/*
+tar --owner=root --group=root -czf "zoekt-deploy-${VERSION}.tar.gz" "${out}"/*
 
-rm -rf ${out}
+rm -rf "${out}"
