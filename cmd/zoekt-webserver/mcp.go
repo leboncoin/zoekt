@@ -143,9 +143,10 @@ func makeWellKnownHandler(oktaBaseURL string, logger sglog.Logger) http.HandlerF
 
 // jwtVerifier validates Okta JWT tokens via JWKS.
 type jwtVerifier struct {
-	jwksURL string
-	issuer  string
-	cache   *jwk.Cache
+	jwksURL  string
+	issuer   string
+	clientID string
+	cache    *jwk.Cache
 }
 
 func newJWTVerifier(ctx context.Context, oktaBaseURL string, logger sglog.Logger) (*jwtVerifier, error) {
@@ -164,10 +165,16 @@ func newJWTVerifier(ctx context.Context, oktaBaseURL string, logger sglog.Logger
 		}
 	}()
 
+	clientID := os.Getenv("ZOEKT_OKTA_CLIENT_ID")
+	if clientID == "" {
+		return nil, fmt.Errorf("ZOEKT_OKTA_CLIENT_ID is required")
+	}
+
 	return &jwtVerifier{
-		jwksURL: jwksURL,
-		issuer:  oktaBaseURL,
-		cache:   cache,
+		jwksURL:  jwksURL,
+		issuer:   oktaBaseURL,
+		clientID: clientID,
+		cache:    cache,
 	}, nil
 }
 
@@ -179,9 +186,11 @@ func (v *jwtVerifier) verify(authHeader string) (string, error) {
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
 	// CachedSet resolves keys from RAM; triggers a JWKS refresh only on unknown kid (okta key rotation).
+	// WithClaimValue("cid") guards against token substitution: it avoids needing a custom authorization server.
 	tok, err := jwt.Parse([]byte(tokenStr),
 		jwt.WithKeySet(jwk.NewCachedSet(v.cache, v.jwksURL)),
 		jwt.WithIssuer(v.issuer),
+		jwt.WithClaimValue("cid", v.clientID),
 		jwt.WithValidate(true),
 	)
 	if err != nil {

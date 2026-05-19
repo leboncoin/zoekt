@@ -31,6 +31,7 @@ docker build -f Dockerfile -t zoekt-test .
 
 ```bash
 docker run --rm \
+  -u $(id -u):$(id -g) \
   -v ${INDEX_VOLUME}:/data/index \
   -v ${REPO_TO_INDEX}:/repo \
   --entrypoint zoekt-git-index \
@@ -46,6 +47,7 @@ This writes index files into the `${INDEX_VOLUME}` Docker volume. Re-run wheneve
 docker run --rm -it \
   -p 8080:8080 \
   -e ZOEKT_OKTA_BASE_URL=${OKTA_BASE_URL} \
+  -e ZOEKT_OKTA_CLIENT_ID=${ZOEKT_OKTA_CLIENT_ID} \
   -e SRC_LOG_LEVEL=info \
   -v ${INDEX_VOLUME}:/data/index \
   --entrypoint zoekt-webserver \
