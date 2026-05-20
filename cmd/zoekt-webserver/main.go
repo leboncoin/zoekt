@@ -252,7 +252,7 @@ func main() {
 
 	debugserver.AddHandlers(serveMux, *enablePprof)
 
-	addMCPHandlers(serveMux, searcher)
+	addMCPHandlers(serveMux, s)
 
 	if *enableIndexserverProxy {
 		socket := filepath.Join(*indexDir, "indexserver.sock")
