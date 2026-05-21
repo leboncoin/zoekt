@@ -14,6 +14,7 @@ import (
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/internal/mockSearcher"
 	"github.com/sourcegraph/zoekt/query"
+	"github.com/sourcegraph/zoekt/web"
 )
 
 // --- jwtAuthMiddleware ---
@@ -186,6 +187,15 @@ func TestMakeWellKnownHandler_UpstreamInvalidJSON(t *testing.T) {
 
 // --- runSearch ---
 
+func webServerWithSearcher(searcher zoekt.Streamer) *web.Server {
+	s := &web.Server{Searcher: searcher, Top: web.Top}
+	// NewMux initializes the template caches required by FormatResults.
+	if _, err := web.NewMux(s); err != nil {
+		panic("webServerWithSearcher: " + err.Error())
+	}
+	return s
+}
+
 func TestRunSearch_ValidQuery(t *testing.T) {
 	mock := &mockSearcher.MockSearcher{
 		WantSearch: mustParseQuery(t, "hello"),
@@ -195,7 +205,7 @@ func TestRunSearch_ValidQuery(t *testing.T) {
 		},
 	}
 
-	result, err := runSearch(context.Background(), streamAdapter{mock}, "hello", 10)
+	result, err := runSearch(context.Background(), webServerWithSearcher(streamAdapter{mock}), "hello", 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -208,14 +218,14 @@ func TestRunSearch_ValidQuery(t *testing.T) {
 }
 
 func TestRunSearch_InvalidQuery(t *testing.T) {
-	_, err := runSearch(context.Background(), streamAdapter{&mockSearcher.MockSearcher{}}, "(", 10)
+	_, err := runSearch(context.Background(), webServerWithSearcher(streamAdapter{&mockSearcher.MockSearcher{}}), "(", 10)
 	if err == nil {
 		t.Fatal("expected error for invalid query")
 	}
 }
 
 func TestRunSearch_SearcherError(t *testing.T) {
-	_, err := runSearch(context.Background(), &errorSearcher{err: errors.New("index unavailable")}, "hello", 10)
+	_, err := runSearch(context.Background(), webServerWithSearcher(&errorSearcher{err: errors.New("index unavailable")}), "hello", 10)
 	if err == nil {
 		t.Fatal("expected error to be propagated from searcher")
 	}
@@ -230,7 +240,7 @@ func TestRunSearch_Truncated(t *testing.T) {
 		},
 	}
 
-	result, err := runSearch(context.Background(), streamAdapter{mock}, "hello", 1)
+	result, err := runSearch(context.Background(), webServerWithSearcher(streamAdapter{mock}), "hello", 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -239,12 +249,91 @@ func TestRunSearch_Truncated(t *testing.T) {
 	}
 }
 
+func TestRunSearch_ResultFormat(t *testing.T) {
+	line := []byte("func hello() {}")
+	mock := &mockSearcher.MockSearcher{
+		WantSearch: mustParseQuery(t, "hello"),
+		SearchResult: &zoekt.SearchResult{
+			Files: []zoekt.FileMatch{{
+				FileName:   "main.go",
+				Repository: "github.mpi-internal.com/leboncoin/myrepo",
+				Language:   "Go",
+				Version:    "abc123",
+				LineMatches: []zoekt.LineMatch{{
+					Line:       line,
+					LineNumber: 5,
+					LineFragments: []zoekt.LineFragmentMatch{{
+						LineOffset:  5,
+						MatchLength: 5,
+					}},
+				}},
+			}},
+			RepoURLs: map[string]string{
+				"github.mpi-internal.com/leboncoin/myrepo": "https://github.mpi-internal.com/leboncoin/myrepo/blob/{{.Version}}/{{.Path}}",
+			},
+			LineFragments: map[string]string{
+				"github.mpi-internal.com/leboncoin/myrepo": "#L{{.LineNumber}}",
+			},
+			Stats: zoekt.Stats{FileCount: 1, MatchCount: 1},
+		},
+	}
+
+	result, err := runSearch(context.Background(), webServerWithSearcher(streamAdapter{mock}), "hello", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(result.Files))
+	}
+
+	f := result.Files[0]
+	if f.FileName != "main.go" {
+		t.Errorf("FileName: got %q, want %q", f.FileName, "main.go")
+	}
+	if f.Repo != "github.mpi-internal.com/leboncoin/myrepo" {
+		t.Errorf("Repo: got %q", f.Repo)
+	}
+	if f.Language != "Go" {
+		t.Errorf("Language: got %q, want Go", f.Language)
+	}
+	wantFileURL := "https://github.mpi-internal.com/leboncoin/myrepo/blob/abc123/main.go"
+	if f.URL != wantFileURL {
+		t.Errorf("file URL: got %q, want %q", f.URL, wantFileURL)
+	}
+	if len(f.Matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(f.Matches))
+	}
+
+	m := f.Matches[0]
+	if m.LineNum != 5 {
+		t.Errorf("LineNum: got %d, want 5", m.LineNum)
+	}
+	wantMatchURL := wantFileURL + "#L5"
+	if m.URL != wantMatchURL {
+		t.Errorf("match URL: got %q, want %q", m.URL, wantMatchURL)
+	}
+	if len(m.Fragments) != 1 {
+		t.Fatalf("expected 1 fragment, got %d", len(m.Fragments))
+	}
+
+	frag := m.Fragments[0]
+	if frag.Pre != "func " {
+		t.Errorf("Pre: got %q, want %q", frag.Pre, "func ")
+	}
+	if frag.Match != "hello" {
+		t.Errorf("Match: got %q, want %q", frag.Match, "hello")
+	}
+	if frag.Post != "() {}" {
+		t.Errorf("Post: got %q, want %q", frag.Post, "() {}")
+	}
+}
+
 // --- addMCPHandlers ---
 
 func TestAddMCPHandlers_SkipsWhenEnvUnset(t *testing.T) {
 	t.Setenv("ZOEKT_OKTA_BASE_URL", "")
 	mux := http.NewServeMux()
-	addMCPHandlers(mux, streamAdapter{&mockSearcher.MockSearcher{}})
+	addMCPHandlers(mux, webServerWithSearcher(streamAdapter{&mockSearcher.MockSearcher{}}))
 
 	for _, path := range []string{mcpPath, wellKnownPath} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)

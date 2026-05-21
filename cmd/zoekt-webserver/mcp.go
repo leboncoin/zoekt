@@ -18,6 +18,7 @@ import (
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/index"
 	"github.com/sourcegraph/zoekt/query"
+	"github.com/sourcegraph/zoekt/web"
 )
 
 const (
@@ -37,7 +38,7 @@ func subjectFromContext(ctx context.Context) (string, bool) {
 }
 
 // addMCPHandlers registers the MCP server and OAuth discovery routes on mux.
-func addMCPHandlers(mux *http.ServeMux, searcher zoekt.Streamer) {
+func addMCPHandlers(mux *http.ServeMux, webSrv *web.Server) {
 	logger := sglog.Scoped("mcp")
 
 	oktaBaseURL := os.Getenv("ZOEKT_OKTA_BASE_URL")
@@ -64,7 +65,7 @@ func addMCPHandlers(mux *http.ServeMux, searcher zoekt.Streamer) {
 		return
 	}
 
-	mcpServer := buildMCPServer(searcher, logger)
+	mcpServer := buildMCPServer(webSrv, logger)
 	httpServer := server.NewStreamableHTTPServer(mcpServer)
 
 	mux.Handle(mcpPath, jwtAuthMiddleware(verifier, logger, httpServer))
@@ -201,13 +202,15 @@ func (v *jwtVerifier) verify(authHeader string) (string, error) {
 }
 
 // buildMCPServer creates the MCP server with the zoekt_search tool.
-func buildMCPServer(searcher zoekt.Streamer, logger sglog.Logger) *server.MCPServer {
+func buildMCPServer(webSrv *web.Server, logger sglog.Logger) *server.MCPServer {
 	s := server.NewMCPServer("zoekt-search", index.Version,
 		server.WithToolCapabilities(false),
 	)
 
 	zoektSearchTool := mcp.NewTool("zoekt_search",
 		mcp.WithDescription("Search code across all internal LBC repositories using Zoekt."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("query",
 			mcp.Required(),
 			mcp.Description(`Zoekt query string. Examples:
@@ -247,7 +250,7 @@ func buildMCPServer(searcher zoekt.Streamer, logger sglog.Logger) *server.MCPSer
 			sglog.Int("num", num),
 		)
 
-		results, err := runSearch(ctx, searcher, queryStr, num)
+		results, err := runSearch(ctx, webSrv, queryStr, num)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
@@ -267,31 +270,39 @@ func buildMCPServer(searcher zoekt.Streamer, logger sglog.Logger) *server.MCPSer
 }
 
 type searchResult struct {
-	FileCountTotal  int               `json:"file_count_total"`
-	MatchCountTotal int               `json:"match_count_total"`
-	Truncated       bool              `json:"truncated"`
-	Files           []zoekt.FileMatch `json:"files"`
+	FileCountTotal  int              `json:"file_count_total"`
+	MatchCountTotal int              `json:"match_count_total"`
+	Truncated       bool             `json:"truncated"`
+	Files           []*web.FileMatch `json:"files"`
 }
 
-func runSearch(ctx context.Context, searcher zoekt.Streamer, queryStr string, num int) (*searchResult, error) {
+func runSearch(ctx context.Context, webSrv *web.Server, queryStr string, num int) (*searchResult, error) {
+	if webSrv.Searcher == nil {
+		return nil, fmt.Errorf("searcher not configured")
+	}
+
 	q, err := query.Parse(queryStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid query: %w", err)
 	}
 
-	opts := &zoekt.SearchOptions{
+	sr, err := webSrv.Searcher.Search(ctx, q, &zoekt.SearchOptions{
 		MaxDocDisplayCount: num,
-	}
-
-	sr, err := searcher.Search(ctx, q, opts)
+		MaxWallTime:        10 * time.Second,
+	})
 	if err != nil {
 		return nil, err
+	}
+
+	files, err := webSrv.FormatResults(sr, queryStr)
+	if err != nil {
+		return nil, fmt.Errorf("format results: %w", err)
 	}
 
 	return &searchResult{
 		FileCountTotal:  sr.Stats.FileCount,
 		MatchCountTotal: sr.Stats.MatchCount,
 		Truncated:       len(sr.Files) < sr.Stats.FileCount,
-		Files:           sr.Files,
+		Files:           files,
 	}, nil
 }
