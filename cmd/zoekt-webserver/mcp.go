@@ -209,6 +209,8 @@ func buildMCPServer(webSrv *web.Server, logger sglog.Logger) *server.MCPServer {
 
 	zoektSearchTool := mcp.NewTool("zoekt_search",
 		mcp.WithDescription("Search code across all internal LBC repositories using Zoekt."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("query",
 			mcp.Required(),
 			mcp.Description(`Zoekt query string. Examples:
