@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +21,7 @@ import (
 // --- jwtAuthMiddleware ---
 
 func TestJWTAuthMiddleware_NoToken(t *testing.T) {
-	v := &fakeVerifier{err: errors.New("missing Bearer token")}
+	v := &fakeVerifier{err: fmt.Errorf("missing Bearer token: %w", errInvalidRequest)}
 	handler := jwtAuthMiddleware(v, noopLogger(t), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -32,14 +33,14 @@ func TestJWTAuthMiddleware_NoToken(t *testing.T) {
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rr.Code)
 	}
-	if rr.Header().Get("WWW-Authenticate") != `Bearer error="invalid_token"` {
+	if rr.Header().Get("WWW-Authenticate") != `Bearer realm="zoekt", error="invalid_request"` {
 		t.Fatalf("unexpected WWW-Authenticate: %s", rr.Header().Get("WWW-Authenticate"))
 	}
 	var body map[string]string
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if body["error"] != "invalid_token" {
+	if body["error"] != "invalid_request" {
 		t.Fatalf("unexpected error field: %s", body["error"])
 	}
 	if body["error_description"] == "" {

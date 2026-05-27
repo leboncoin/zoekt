@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -77,6 +78,10 @@ type tokenVerifier interface {
 	verify(authHeader string) (string, error)
 }
 
+// errInvalidRequest signals a malformed or missing Authorization header (RFC 6750 §3 invalid_request).
+// Distinct from a well-formed token that fails validation (invalid_token).
+var errInvalidRequest = fmt.Errorf("invalid_request")
+
 // jwtAuthMiddleware validates the Bearer token and injects the subject into the request context.
 func jwtAuthMiddleware(v tokenVerifier, logger sglog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,11 +93,15 @@ func jwtAuthMiddleware(v tokenVerifier, logger sglog.Logger, next http.Handler) 
 					sglog.String("remote_addr", r.RemoteAddr),
 				)
 			}
+			oauthErr := "invalid_token"
+			if errors.Is(err, errInvalidRequest) {
+				oauthErr = "invalid_request"
+			}
 			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="zoekt", error=%q`, oauthErr))
 			w.WriteHeader(http.StatusUnauthorized)
 			if encErr := json.NewEncoder(w).Encode(map[string]string{
-				"error":             "invalid_token",
+				"error":             oauthErr,
 				"error_description": "Authentication required",
 			}); encErr != nil {
 				logger.Warn("failed to write 401 response body", sglog.Error(encErr))
@@ -182,7 +191,7 @@ func newJWTVerifier(ctx context.Context, oktaBaseURL string, logger sglog.Logger
 // verify extracts and validates the Bearer token, returning the subject claim.
 func (v *jwtVerifier) verify(authHeader string) (string, error) {
 	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return "", fmt.Errorf("missing Bearer token")
+		return "", fmt.Errorf("missing Bearer token: %w", errInvalidRequest)
 	}
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
