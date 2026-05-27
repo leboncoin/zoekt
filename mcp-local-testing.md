@@ -13,7 +13,7 @@ End-to-end guide to test the MCP OAuth flow locally using Docker.
 Adjust these to your environment:
 
 ```bash
-REPO_TO_INDEX=~/repositories/zoekt   # local repo to index
+REPO_TO_INDEX=~/repositories/zoekt   # local zoekt repo to index
 INDEX_VOLUME=zoekt-index-test         # Docker volume name for the index
 OKTA_BASE_URL=<your_okta_base_url>
 ZOEKT_OKTA_CLIENT_ID=<your_client_id>
@@ -23,7 +23,7 @@ CALLBACK_PORT=9877                    # must be registered as redirect URI in Ok
 ## 1. Build the image
 
 ```bash
-cd ~/repositories/zoekt
+cd $REPO_TO_INDEX
 docker build -f Dockerfile -t zoekt-test .
 ```
 
@@ -58,8 +58,8 @@ docker run --rm -it \
 ## 4. Verify the server is up
 
 ```bash
-# OAuth discovery endpoint — should return Okta metadata
-curl http://localhost:8080/.well-known/oauth-authorization-server | jq .issuer
+# OAuth discovery endpoint — should return Okta
+curl http://localhost:8080/.well-known/oauth-protected-resource/mcp | jq .authorization_servers
 
 # MCP endpoint without token — should return 401
 curl http://localhost:8080/mcp
@@ -69,7 +69,7 @@ curl http://localhost:8080/mcp
 
 ```bash
   claude mcp add-json zoekt-search \
-  '{"type":"http","url":"http://localhost:8080/mcp","oauth":{"clientId":"'${ZOEKT_OKTA_CLIENT_ID}'","callbackPort":'${CALLBACK_PORT}',"scopes":"openid profile offline_access"}}
+  '{"type":"http","url":"http://localhost:8080/mcp","oauth":{"clientId":"'${ZOEKT_OKTA_CLIENT_ID}'","callbackPort":'${CALLBACK_PORT}',"scopes":"openid profile offline_access"}}'
 ```
 
 Click **Authenticate** in Claude Code to trigger the Okta PKCE flow. Once authenticated, the `zoekt_search` tool is available.
