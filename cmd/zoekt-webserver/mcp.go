@@ -118,7 +118,7 @@ func isJWKSError(err error) bool {
 }
 
 // makeProtectedResourceHandler serves RFC 9728 Protected Resource Metadata.
-// Claude Code checks this endpoint first before falling back to /.well-known/oauth-authorization-server.
+// Claude Code requests /.well-known/oauth-protected-resource/{resource-path} to discover the authorization server.
 func makeProtectedResourceHandler(oktaBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		resource := "http://" + r.Host + mcpPath
