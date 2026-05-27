@@ -114,20 +114,12 @@ func TestSubjectFromContext_Present(t *testing.T) {
 	}
 }
 
-// --- makeWellKnownHandler ---
+// --- makeProtectedResourceHandler ---
 
-func TestMakeWellKnownHandler_Success(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                 "https://example.okta.com",
-			"authorization_endpoint": "https://example.okta.com/oauth2/v1/authorize",
-		})
-	}))
-	defer upstream.Close()
-
-	handler := makeWellKnownHandler(upstream.URL, noopLogger(t))
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+func TestMakeProtectedResourceHandler(t *testing.T) {
+	handler := makeProtectedResourceHandler("https://example.okta.com")
+	req := httptest.NewRequest(http.MethodGet, protectedResourcePath, nil)
+	req.Host = "zoekt.example.com"
 	rr := httptest.NewRecorder()
 	handler(rr, req)
 
@@ -138,51 +130,16 @@ func TestMakeWellKnownHandler_Success(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&metadata); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if metadata["issuer"] != "https://example.okta.com" {
-		t.Fatalf("unexpected issuer: %v", metadata["issuer"])
+	if metadata["resource"] != "https://zoekt.example.com/mcp" {
+		t.Fatalf("unexpected resource: %v", metadata["resource"])
 	}
-}
-
-func TestMakeWellKnownHandler_UpstreamError(t *testing.T) {
-	handler := makeWellKnownHandler("http://127.0.0.1:0", noopLogger(t))
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502, got %d", rr.Code)
+	servers, ok := metadata["authorization_servers"].([]any)
+	if !ok || len(servers) != 1 || servers[0] != "https://example.okta.com" {
+		t.Fatalf("unexpected authorization_servers: %v", metadata["authorization_servers"])
 	}
-}
-
-func TestMakeWellKnownHandler_UpstreamNon200(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer upstream.Close()
-
-	handler := makeWellKnownHandler(upstream.URL, noopLogger(t))
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502 for upstream 500, got %d", rr.Code)
-	}
-}
-
-func TestMakeWellKnownHandler_UpstreamInvalidJSON(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("not-json"))
-	}))
-	defer upstream.Close()
-
-	handler := makeWellKnownHandler(upstream.URL, noopLogger(t))
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502 for invalid JSON, got %d", rr.Code)
+	scopes, ok := metadata["scopes_supported"].([]any)
+	if !ok || len(scopes) == 0 {
+		t.Fatalf("expected scopes_supported, got: %v", metadata["scopes_supported"])
 	}
 }
 
@@ -336,7 +293,7 @@ func TestAddMCPHandlers_SkipsWhenEnvUnset(t *testing.T) {
 	mux := http.NewServeMux()
 	addMCPHandlers(mux, webServerWithSearcher(streamAdapter{&mockSearcher.MockSearcher{}}))
 
-	for _, path := range []string{mcpPath, wellKnownPath} {
+	for _, path := range []string{mcpPath, protectedResourcePath} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, req)

@@ -23,15 +23,13 @@ import (
 )
 
 const (
-	mcpPath       = "/mcp"
-	wellKnownPath = "/.well-known/oauth-authorization-server"
+	mcpPath               = "/mcp"
+	protectedResourcePath = "/.well-known/oauth-protected-resource"
 )
 
 type mcpContextKey string
 
 const tokenSubjectKey mcpContextKey = "token_subject"
-
-var proxyClient = &http.Client{Timeout: 5 * time.Second}
 
 func subjectFromContext(ctx context.Context) (string, bool) {
 	sub, ok := ctx.Value(tokenSubjectKey).(string)
@@ -49,7 +47,7 @@ func addMCPHandlers(mux *http.ServeMux, webSrv *web.Server) {
 		mux.HandleFunc(mcpPath, func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, unavailable, http.StatusServiceUnavailable)
 		})
-		mux.HandleFunc(wellKnownPath, func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(protectedResourcePath, func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, unavailable, http.StatusServiceUnavailable)
 		})
 		return
@@ -62,7 +60,7 @@ func addMCPHandlers(mux *http.ServeMux, webSrv *web.Server) {
 		mux.HandleFunc(mcpPath, func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, errMsg, http.StatusServiceUnavailable)
 		})
-		mux.HandleFunc(wellKnownPath, makeWellKnownHandler(oktaBaseURL, logger))
+		mux.HandleFunc(protectedResourcePath, makeProtectedResourceHandler(oktaBaseURL))
 		return
 	}
 
@@ -70,7 +68,7 @@ func addMCPHandlers(mux *http.ServeMux, webSrv *web.Server) {
 	httpServer := server.NewStreamableHTTPServer(mcpServer)
 
 	mux.Handle(mcpPath, jwtAuthMiddleware(verifier, logger, httpServer))
-	mux.HandleFunc(wellKnownPath, makeWellKnownHandler(oktaBaseURL, logger))
+	mux.HandleFunc(protectedResourcePath, makeProtectedResourceHandler(oktaBaseURL))
 }
 
 // tokenVerifier is an interface for JWT verification, allowing test doubles.
@@ -119,34 +117,18 @@ func isJWKSError(err error) bool {
 	return strings.Contains(err.Error(), "failed to fetch JWKS")
 }
 
-// makeWellKnownHandler proxies Okta's OAuth metadata so Claude Code (or MCP client) can discover
-// /authorize and /token to authenticate. No Dynamic Client Registration (DCR) : a client_id is provided.
-func makeWellKnownHandler(oktaBaseURL string, logger sglog.Logger) http.HandlerFunc {
+// makeProtectedResourceHandler serves RFC 9728 Protected Resource Metadata.
+// Claude Code checks this endpoint first before falling back to /.well-known/oauth-authorization-server.
+func makeProtectedResourceHandler(oktaBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp, err := proxyClient.Get(oktaBaseURL + "/.well-known/oauth-authorization-server")
-		if err != nil {
-			logger.Error("failed to fetch Okta metadata", sglog.Error(err))
-			http.Error(w, fmt.Sprintf("failed to reach Okta: %v", err), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			logger.Error("Okta metadata returned non-200", sglog.Int("status", resp.StatusCode))
-			http.Error(w, fmt.Sprintf("Okta returned %d", resp.StatusCode), http.StatusBadGateway)
-			return
-		}
-
-		var metadata map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
-			logger.Error("failed to decode Okta metadata", sglog.Error(err))
-			http.Error(w, "upstream error", http.StatusBadGateway)
-			return
-		}
-
+		resource := "https://" + r.Host + mcpPath
 		w.Header().Set("Content-Type", "application/json")
-		if encErr := json.NewEncoder(w).Encode(metadata); encErr != nil {
-			logger.Warn("failed to write well-known response body", sglog.Error(encErr))
+		if encErr := json.NewEncoder(w).Encode(map[string]any{
+			"resource":             resource,
+			"authorization_servers": []string{oktaBaseURL},
+			"scopes_supported":     []string{"openid", "profile", "offline_access"},
+		}); encErr != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
 	}
 }
