@@ -121,7 +121,11 @@ func isJWKSError(err error) bool {
 // Claude Code requests /.well-known/oauth-protected-resource/{resource-path} to discover the authorization server.
 func makeProtectedResourceHandler(oktaBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resource := "http://" + r.Host + mcpPath
+		scheme := "https"
+		if r.TLS == nil {
+			scheme = "http"
+		}
+		resource := scheme + "://" + r.Host + mcpPath
 		w.Header().Set("Content-Type", "application/json")
 		if encErr := json.NewEncoder(w).Encode(map[string]any{
 			"resource":             resource,
