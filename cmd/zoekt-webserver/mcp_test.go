@@ -309,6 +309,23 @@ func TestAddMCPHandlers_SkipsWhenEnvUnset(t *testing.T) {
 	}
 }
 
+// TestAddMCPHandlers_ProtectedResourcePathSuffix verifies that the mux matches
+// /.well-known/oauth-protected-resource/mcp (RFC 9728 §3 suffix form) and not just the bare path.
+// Regression guard: removing the trailing slash from protectedResourcePath would break this.
+func TestAddMCPHandlers_ProtectedResourcePathSuffix(t *testing.T) {
+	t.Setenv("ZOEKT_OKTA_BASE_URL", "")
+	mux := http.NewServeMux()
+	addMCPHandlers(mux, webServerWithSearcher(streamAdapter{&mockSearcher.MockSearcher{}}))
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource/mcp", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusNotFound {
+		t.Fatal("/.well-known/oauth-protected-resource/mcp returned 404 — trailing slash missing from route registration")
+	}
+}
+
 // --- helpers ---
 
 // fakeVerifier is a test double for tokenVerifier.

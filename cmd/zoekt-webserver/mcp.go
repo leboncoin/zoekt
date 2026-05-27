@@ -122,7 +122,7 @@ func isJWKSError(err error) bool {
 func makeProtectedResourceHandler(oktaBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		scheme := "https"
-		if r.TLS == nil {
+		if strings.HasPrefix(r.Host, "localhost") {
 			scheme = "http"
 		}
 		resource := scheme + "://" + r.Host + mcpPath
