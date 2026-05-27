@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +21,7 @@ import (
 // --- jwtAuthMiddleware ---
 
 func TestJWTAuthMiddleware_NoToken(t *testing.T) {
-	v := &fakeVerifier{err: errors.New("missing Bearer token")}
+	v := &fakeVerifier{err: fmt.Errorf("missing Bearer token: %w", errInvalidRequest)}
 	handler := jwtAuthMiddleware(v, noopLogger(t), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -32,14 +33,14 @@ func TestJWTAuthMiddleware_NoToken(t *testing.T) {
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rr.Code)
 	}
-	if rr.Header().Get("WWW-Authenticate") != `Bearer error="invalid_token"` {
+	if rr.Header().Get("WWW-Authenticate") != `Bearer realm="zoekt", error="invalid_request"` {
 		t.Fatalf("unexpected WWW-Authenticate: %s", rr.Header().Get("WWW-Authenticate"))
 	}
 	var body map[string]string
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if body["error"] != "invalid_token" {
+	if body["error"] != "invalid_request" {
 		t.Fatalf("unexpected error field: %s", body["error"])
 	}
 	if body["error_description"] == "" {
@@ -113,75 +114,35 @@ func TestSubjectFromContext_Present(t *testing.T) {
 	}
 }
 
-// --- makeWellKnownHandler ---
+// --- makeProtectedResourceHandler ---
 
-func TestMakeWellKnownHandler_Success(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                 "https://example.okta.com",
-			"authorization_endpoint": "https://example.okta.com/oauth2/v1/authorize",
-		})
-	}))
-	defer upstream.Close()
+func TestMakeProtectedResourceHandler(t *testing.T) {
+	// RFC 9728 §3: Claude Code requests /.well-known/oauth-protected-resource/mcp
+	// (the resource path appended after the well-known prefix).
+	for _, path := range []string{protectedResourcePath, "/.well-known/oauth-protected-resource/mcp"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "localhost:8080"
+		rr := httptest.NewRecorder()
+		makeProtectedResourceHandler("https://example.okta.com")(rr, req)
 
-	handler := makeWellKnownHandler(upstream.URL, noopLogger(t))
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
-	}
-	var metadata map[string]any
-	if err := json.NewDecoder(rr.Body).Decode(&metadata); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if metadata["issuer"] != "https://example.okta.com" {
-		t.Fatalf("unexpected issuer: %v", metadata["issuer"])
-	}
-}
-
-func TestMakeWellKnownHandler_UpstreamError(t *testing.T) {
-	handler := makeWellKnownHandler("http://127.0.0.1:0", noopLogger(t))
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502, got %d", rr.Code)
-	}
-}
-
-func TestMakeWellKnownHandler_UpstreamNon200(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer upstream.Close()
-
-	handler := makeWellKnownHandler(upstream.URL, noopLogger(t))
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502 for upstream 500, got %d", rr.Code)
-	}
-}
-
-func TestMakeWellKnownHandler_UpstreamInvalidJSON(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("not-json"))
-	}))
-	defer upstream.Close()
-
-	handler := makeWellKnownHandler(upstream.URL, noopLogger(t))
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502 for invalid JSON, got %d", rr.Code)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("path %s: expected 200, got %d", path, rr.Code)
+		}
+		var metadata map[string]any
+		if err := json.NewDecoder(rr.Body).Decode(&metadata); err != nil {
+			t.Fatalf("path %s: decode response: %v", path, err)
+		}
+		if metadata["resource"] != "http://localhost:8080/mcp" {
+			t.Fatalf("path %s: unexpected resource: %v", path, metadata["resource"])
+		}
+		servers, ok := metadata["authorization_servers"].([]any)
+		if !ok || len(servers) != 1 || servers[0] != "https://example.okta.com" {
+			t.Fatalf("path %s: unexpected authorization_servers: %v", path, metadata["authorization_servers"])
+		}
+		scopes, ok := metadata["scopes_supported"].([]any)
+		if !ok || len(scopes) == 0 {
+			t.Fatalf("path %s: expected scopes_supported, got: %v", path, metadata["scopes_supported"])
+		}
 	}
 }
 
@@ -335,7 +296,7 @@ func TestAddMCPHandlers_SkipsWhenEnvUnset(t *testing.T) {
 	mux := http.NewServeMux()
 	addMCPHandlers(mux, webServerWithSearcher(streamAdapter{&mockSearcher.MockSearcher{}}))
 
-	for _, path := range []string{mcpPath, wellKnownPath} {
+	for _, path := range []string{mcpPath, protectedResourcePath} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, req)
@@ -345,6 +306,23 @@ func TestAddMCPHandlers_SkipsWhenEnvUnset(t *testing.T) {
 		if !strings.Contains(rr.Body.String(), "ZOEKT_OKTA_BASE_URL not set") {
 			t.Fatalf("expected body to mention ZOEKT_OKTA_BASE_URL, got %q", rr.Body.String())
 		}
+	}
+}
+
+// TestAddMCPHandlers_ProtectedResourcePathSuffix verifies that the mux matches
+// /.well-known/oauth-protected-resource/mcp (RFC 9728 §3 suffix form) and not just the bare path.
+// Regression guard: removing the trailing slash from protectedResourcePath would break this.
+func TestAddMCPHandlers_ProtectedResourcePathSuffix(t *testing.T) {
+	t.Setenv("ZOEKT_OKTA_BASE_URL", "")
+	mux := http.NewServeMux()
+	addMCPHandlers(mux, webServerWithSearcher(streamAdapter{&mockSearcher.MockSearcher{}}))
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource/mcp", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusNotFound {
+		t.Fatal("/.well-known/oauth-protected-resource/mcp returned 404 — trailing slash missing from route registration")
 	}
 }
 

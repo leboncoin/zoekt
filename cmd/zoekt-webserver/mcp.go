@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -22,15 +23,13 @@ import (
 )
 
 const (
-	mcpPath       = "/mcp"
-	wellKnownPath = "/.well-known/oauth-authorization-server"
+	mcpPath               = "/mcp"
+	protectedResourcePath = "/.well-known/oauth-protected-resource/"
 )
 
 type mcpContextKey string
 
 const tokenSubjectKey mcpContextKey = "token_subject"
-
-var proxyClient = &http.Client{Timeout: 5 * time.Second}
 
 func subjectFromContext(ctx context.Context) (string, bool) {
 	sub, ok := ctx.Value(tokenSubjectKey).(string)
@@ -48,7 +47,7 @@ func addMCPHandlers(mux *http.ServeMux, webSrv *web.Server) {
 		mux.HandleFunc(mcpPath, func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, unavailable, http.StatusServiceUnavailable)
 		})
-		mux.HandleFunc(wellKnownPath, func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(protectedResourcePath, func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, unavailable, http.StatusServiceUnavailable)
 		})
 		return
@@ -61,7 +60,7 @@ func addMCPHandlers(mux *http.ServeMux, webSrv *web.Server) {
 		mux.HandleFunc(mcpPath, func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, errMsg, http.StatusServiceUnavailable)
 		})
-		mux.HandleFunc(wellKnownPath, makeWellKnownHandler(oktaBaseURL, logger))
+		mux.HandleFunc(protectedResourcePath, makeProtectedResourceHandler(oktaBaseURL))
 		return
 	}
 
@@ -69,13 +68,17 @@ func addMCPHandlers(mux *http.ServeMux, webSrv *web.Server) {
 	httpServer := server.NewStreamableHTTPServer(mcpServer)
 
 	mux.Handle(mcpPath, jwtAuthMiddleware(verifier, logger, httpServer))
-	mux.HandleFunc(wellKnownPath, makeWellKnownHandler(oktaBaseURL, logger))
+	mux.HandleFunc(protectedResourcePath, makeProtectedResourceHandler(oktaBaseURL))
 }
 
 // tokenVerifier is an interface for JWT verification, allowing test doubles.
 type tokenVerifier interface {
 	verify(authHeader string) (string, error)
 }
+
+// errInvalidRequest signals a malformed or missing Authorization header (RFC 6750 §3 invalid_request).
+// Distinct from a well-formed token that fails validation (invalid_token).
+var errInvalidRequest = fmt.Errorf("invalid_request")
 
 // jwtAuthMiddleware validates the Bearer token and injects the subject into the request context.
 func jwtAuthMiddleware(v tokenVerifier, logger sglog.Logger, next http.Handler) http.Handler {
@@ -88,11 +91,15 @@ func jwtAuthMiddleware(v tokenVerifier, logger sglog.Logger, next http.Handler) 
 					sglog.String("remote_addr", r.RemoteAddr),
 				)
 			}
+			oauthErr := "invalid_token"
+			if errors.Is(err, errInvalidRequest) {
+				oauthErr = "invalid_request"
+			}
 			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="zoekt", error=%q`, oauthErr))
 			w.WriteHeader(http.StatusUnauthorized)
 			if encErr := json.NewEncoder(w).Encode(map[string]string{
-				"error":             "invalid_token",
+				"error":             oauthErr,
 				"error_description": "Authentication required",
 			}); encErr != nil {
 				logger.Warn("failed to write 401 response body", sglog.Error(encErr))
@@ -110,34 +117,22 @@ func isJWKSError(err error) bool {
 	return strings.Contains(err.Error(), "failed to fetch JWKS")
 }
 
-// makeWellKnownHandler proxies Okta's OAuth metadata so Claude Code (or MCP client) can discover
-// /authorize and /token to authenticate. No Dynamic Client Registration (DCR) : a client_id is provided.
-func makeWellKnownHandler(oktaBaseURL string, logger sglog.Logger) http.HandlerFunc {
+// makeProtectedResourceHandler serves RFC 9728 Protected Resource Metadata.
+// Claude Code requests /.well-known/oauth-protected-resource/{resource-path} to discover the authorization server.
+func makeProtectedResourceHandler(oktaBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp, err := proxyClient.Get(oktaBaseURL + "/.well-known/oauth-authorization-server")
-		if err != nil {
-			logger.Error("failed to fetch Okta metadata", sglog.Error(err))
-			http.Error(w, fmt.Sprintf("failed to reach Okta: %v", err), http.StatusBadGateway)
-			return
+		scheme := "https"
+		if strings.HasPrefix(r.Host, "localhost") {
+			scheme = "http"
 		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			logger.Error("Okta metadata returned non-200", sglog.Int("status", resp.StatusCode))
-			http.Error(w, fmt.Sprintf("Okta returned %d", resp.StatusCode), http.StatusBadGateway)
-			return
-		}
-
-		var metadata map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
-			logger.Error("failed to decode Okta metadata", sglog.Error(err))
-			http.Error(w, "upstream error", http.StatusBadGateway)
-			return
-		}
-
+		resource := scheme + "://" + r.Host + mcpPath
 		w.Header().Set("Content-Type", "application/json")
-		if encErr := json.NewEncoder(w).Encode(metadata); encErr != nil {
-			logger.Warn("failed to write well-known response body", sglog.Error(encErr))
+		if encErr := json.NewEncoder(w).Encode(map[string]any{
+			"resource":             resource,
+			"authorization_servers": []string{oktaBaseURL},
+			"scopes_supported":     []string{"openid", "profile", "offline_access"},
+		}); encErr != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
 	}
 }
@@ -182,7 +177,7 @@ func newJWTVerifier(ctx context.Context, oktaBaseURL string, logger sglog.Logger
 // verify extracts and validates the Bearer token, returning the subject claim.
 func (v *jwtVerifier) verify(authHeader string) (string, error) {
 	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return "", fmt.Errorf("missing Bearer token")
+		return "", fmt.Errorf("missing Bearer token: %w", errInvalidRequest)
 	}
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
