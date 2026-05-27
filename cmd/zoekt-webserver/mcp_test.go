@@ -117,29 +117,32 @@ func TestSubjectFromContext_Present(t *testing.T) {
 // --- makeProtectedResourceHandler ---
 
 func TestMakeProtectedResourceHandler(t *testing.T) {
-	handler := makeProtectedResourceHandler("https://example.okta.com")
-	req := httptest.NewRequest(http.MethodGet, protectedResourcePath, nil)
-	req.Host = "zoekt.example.com"
-	rr := httptest.NewRecorder()
-	handler(rr, req)
+	// RFC 9728 §3: Claude Code requests /.well-known/oauth-protected-resource/mcp
+	// (the resource path appended after the well-known prefix).
+	for _, path := range []string{protectedResourcePath, "/.well-known/oauth-protected-resource/mcp"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "localhost:8080"
+		rr := httptest.NewRecorder()
+		makeProtectedResourceHandler("https://example.okta.com")(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
-	}
-	var metadata map[string]any
-	if err := json.NewDecoder(rr.Body).Decode(&metadata); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if metadata["resource"] != "https://zoekt.example.com/mcp" {
-		t.Fatalf("unexpected resource: %v", metadata["resource"])
-	}
-	servers, ok := metadata["authorization_servers"].([]any)
-	if !ok || len(servers) != 1 || servers[0] != "https://example.okta.com" {
-		t.Fatalf("unexpected authorization_servers: %v", metadata["authorization_servers"])
-	}
-	scopes, ok := metadata["scopes_supported"].([]any)
-	if !ok || len(scopes) == 0 {
-		t.Fatalf("expected scopes_supported, got: %v", metadata["scopes_supported"])
+		if rr.Code != http.StatusOK {
+			t.Fatalf("path %s: expected 200, got %d", path, rr.Code)
+		}
+		var metadata map[string]any
+		if err := json.NewDecoder(rr.Body).Decode(&metadata); err != nil {
+			t.Fatalf("path %s: decode response: %v", path, err)
+		}
+		if metadata["resource"] != "http://localhost:8080/mcp" {
+			t.Fatalf("path %s: unexpected resource: %v", path, metadata["resource"])
+		}
+		servers, ok := metadata["authorization_servers"].([]any)
+		if !ok || len(servers) != 1 || servers[0] != "https://example.okta.com" {
+			t.Fatalf("path %s: unexpected authorization_servers: %v", path, metadata["authorization_servers"])
+		}
+		scopes, ok := metadata["scopes_supported"].([]any)
+		if !ok || len(scopes) == 0 {
+			t.Fatalf("path %s: expected scopes_supported, got: %v", path, metadata["scopes_supported"])
+		}
 	}
 }
 

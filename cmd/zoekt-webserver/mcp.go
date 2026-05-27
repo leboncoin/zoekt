@@ -24,7 +24,7 @@ import (
 
 const (
 	mcpPath               = "/mcp"
-	protectedResourcePath = "/.well-known/oauth-protected-resource"
+	protectedResourcePath = "/.well-known/oauth-protected-resource/"
 )
 
 type mcpContextKey string
@@ -121,7 +121,7 @@ func isJWKSError(err error) bool {
 // Claude Code checks this endpoint first before falling back to /.well-known/oauth-authorization-server.
 func makeProtectedResourceHandler(oktaBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resource := "https://" + r.Host + mcpPath
+		resource := "http://" + r.Host + mcpPath
 		w.Header().Set("Content-Type", "application/json")
 		if encErr := json.NewEncoder(w).Encode(map[string]any{
 			"resource":             resource,
