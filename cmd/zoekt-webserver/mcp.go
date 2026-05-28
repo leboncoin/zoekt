@@ -24,7 +24,7 @@ import (
 
 const (
 	mcpPath               = "/mcp"
-	protectedResourcePath = "/.well-known/oauth-protected-resource/"
+	protectedResourcePath = "/.well-known/oauth-protected-resource" + mcpPath
 )
 
 type mcpContextKey string
