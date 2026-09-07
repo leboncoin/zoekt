@@ -161,9 +161,9 @@ func newJWTVerifier(ctx context.Context, oktaBaseURL string, logger sglog.Logger
 		}
 	}()
 
-	clientID := os.Getenv("ZOEKT_OKTA_CLIENT_ID")
+	clientID := os.Getenv("ZOEKT_OKTA_CLIENT_ID_PKCE")
 	if clientID == "" {
-		return nil, fmt.Errorf("ZOEKT_OKTA_CLIENT_ID is required")
+		return nil, fmt.Errorf("ZOEKT_OKTA_CLIENT_ID_PKCE is required")
 	}
 
 	return &jwtVerifier{
